@@ -28,6 +28,7 @@ public class RazorLanguageServer : IAsyncDisposable
     JsonRpc? _clientRpc;
     InitializeParams? _initParams;
     string? _cliSolutionPath;
+    string? _workspaceRoot;
     string _logLevel = "Information";
     bool _disposed;
     readonly TaskCompletionSource _roslynProjectInitialized = new();
@@ -163,6 +164,7 @@ public class RazorLanguageServer : IAsyncDisposable
             workspaceRoot = new Uri(@params.WorkspaceFolders[0].Uri).LocalPath;
         }
 
+        _workspaceRoot = workspaceRoot;
         _configurationLoader.SetWorkspaceRoot(workspaceRoot);
 
         // Parse initializationOptions from the editor (e.g., Helix config = { ... })
@@ -834,6 +836,8 @@ public class RazorLanguageServer : IAsyncDisposable
                     case LspMethods.ProjectInitializationComplete:
                         _logger.LogInformation("Roslyn project initialization complete - server ready");
                         _roslynProjectInitialized.TrySetResult();
+                        // Start warm-up in background to prime Roslyn's caches
+                        _ = Task.Run(() => WarmUpRoslynAsync());
                         break;
 
                     case "window/logMessage":
@@ -1377,6 +1381,109 @@ public class RazorLanguageServer : IAsyncDisposable
             },
             ServerInfo = new ServerInfo("RazorLS", Version)
         };
+    }
+
+    /// <summary>
+    /// Warms up Roslyn's caches by finding and requesting symbols for a file in the workspace.
+    /// This helps reduce latency for the user's first real request.
+    /// </summary>
+    private async Task WarmUpRoslynAsync()
+    {
+        if (_roslynClient == null || _workspaceRoot == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _logger.LogDebug("Starting Roslyn warm-up...");
+
+            // Find a file to warm up with - prefer .razor, then .cs
+            string? warmUpFile = null;
+
+            // Look for .razor files first
+            var razorFiles = Directory.GetFiles(_workspaceRoot, "*.razor", SearchOption.AllDirectories)
+                .Take(5) // Limit search
+                .ToArray();
+
+            if (razorFiles.Length > 0)
+            {
+                // Prefer smaller files for faster warm-up
+                warmUpFile = razorFiles
+                    .OrderBy(f => new FileInfo(f).Length)
+                    .First();
+            }
+            else
+            {
+                // Fall back to .cs files
+                var csFiles = Directory.GetFiles(_workspaceRoot, "*.cs", SearchOption.AllDirectories)
+                    .Where(f => !f.Contains("obj") && !f.Contains("bin"))
+                    .Take(5)
+                    .ToArray();
+
+                if (csFiles.Length > 0)
+                {
+                    warmUpFile = csFiles
+                        .OrderBy(f => new FileInfo(f).Length)
+                        .First();
+                }
+            }
+
+            if (warmUpFile == null)
+            {
+                _logger.LogDebug("No files found for warm-up");
+                return;
+            }
+
+            _logger.LogInformation("Warming up Roslyn with: {File}", warmUpFile);
+
+            var fileUri = new Uri(warmUpFile).AbsoluteUri;
+            var fileContent = await File.ReadAllTextAsync(warmUpFile);
+            var languageId = warmUpFile.EndsWith(".razor", StringComparison.OrdinalIgnoreCase)
+                ? "aspnetcorerazor"
+                : "csharp";
+
+            // Open the document
+            var didOpenParams = new
+            {
+                textDocument = new
+                {
+                    uri = fileUri,
+                    languageId,
+                    version = 1,
+                    text = fileContent
+                }
+            };
+            await _roslynClient.SendNotificationAsync(LspMethods.TextDocumentDidOpen, JsonSerializer.SerializeToElement(didOpenParams, JsonOptions));
+
+            // Give Roslyn a moment to process the document
+            await Task.Delay(100);
+
+            // Send a documentSymbol request to warm up semantic analysis
+            var symbolParams = new
+            {
+                textDocument = new { uri = fileUri }
+            };
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await _roslynClient.SendRequestAsync(
+                LspMethods.TextDocumentDocumentSymbol,
+                JsonSerializer.SerializeToElement(symbolParams, JsonOptions),
+                cts.Token);
+
+            // Close the document
+            var didCloseParams = new
+            {
+                textDocument = new { uri = fileUri }
+            };
+            await _roslynClient.SendNotificationAsync(LspMethods.TextDocumentDidClose, JsonSerializer.SerializeToElement(didCloseParams, JsonOptions));
+
+            _logger.LogInformation("Roslyn warm-up complete");
+        }
+        catch (Exception ex)
+        {
+            // Warm-up failures should not crash the server
+            _logger.LogWarning(ex, "Roslyn warm-up failed (non-fatal)");
+        }
     }
 
     #endregion

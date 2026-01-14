@@ -58,15 +58,21 @@ public class RoslynClient : IAsyncDisposable
             throw new InvalidOperationException("Roslyn client is already started");
         }
 
-        var roslynArgs = BuildCommandLineArgs(options);
         // Run via dotnet: dotnet exec <dll> <args>
-        var allArgs = $"exec \"{options.ServerDllPath}\" {string.Join(" ", roslynArgs)}";
-        _logger.LogInformation("Starting Roslyn: dotnet {Args}", allArgs);
 
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = allArgs,
+            ArgumentList =
+            {
+                "exec", options.ServerDllPath,
+                "--stdio",
+                $"--loglevel={options.LogLevel}",
+                $"--razorDesignTimePath={options.RazorDesignTimePath}",
+                $"--razorSourceGenerator={options.RazorSourceGeneratorPath}",
+                $"--razorDesignTimePath={options.RazorDesignTimePath}",
+                "--extension", options.RazorExtensionPath
+            },
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -77,6 +83,13 @@ public class RoslynClient : IAsyncDisposable
                 ["DOTNET_CLI_UI_LANGUAGE"] = "en"
             }
         };
+
+        if (!string.IsNullOrEmpty(options.LogDirectory))
+        {
+            psi.ArgumentList.Add($"--extensionLogDirectory={options.LogDirectory}");
+        }
+
+        _logger.LogInformation("Starting Roslyn: {} {}", psi.FileName, string.Join(' ', psi.ArgumentList));
 
         _process = Process.Start(psi);
         if (_process == null)
@@ -223,25 +236,6 @@ public class RoslynClient : IAsyncDisposable
         {
             throw new InvalidOperationException("Roslyn client is not connected");
         }
-    }
-
-    private static List<string> BuildCommandLineArgs(RoslynStartOptions options)
-    {
-        var args = new List<string>
-        {
-            "--stdio",
-            $"--logLevel={options.LogLevel}",
-            $"--razorSourceGenerator={options.RazorSourceGeneratorPath}",
-            $"--razorDesignTimePath={options.RazorDesignTimePath}",
-            "--extension", options.RazorExtensionPath
-        };
-
-        if (!string.IsNullOrEmpty(options.LogDirectory))
-        {
-            args.Add($"--extensionLogDirectory={options.LogDirectory}");
-        }
-
-        return args;
     }
 
     public ValueTask DisposeAsync()
