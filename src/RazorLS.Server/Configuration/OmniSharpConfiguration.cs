@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace RazorLS.Server.Configuration;
@@ -31,6 +32,19 @@ public class OmniSharpConfiguration
     /// </summary>
     [JsonPropertyName("csharp")]
     public CSharpOptions? CSharp { get; set; }
+}
+
+/// <summary>
+/// Configuration passed via LSP initializationOptions from the editor.
+/// In Helix, this is configured via the "config" key in languages.toml.
+/// </summary>
+public class InitializationOptions
+{
+    /// <summary>
+    /// HTML language server options.
+    /// </summary>
+    [JsonPropertyName("html")]
+    public HtmlOptions? Html { get; set; }
 }
 
 /// <summary>
@@ -234,4 +248,17 @@ public class CSharpOptions
 
     [JsonPropertyName("suppressDotnetRestoreNotification")]
     public bool? SuppressDotnetRestoreNotification { get; set; }
+}
+
+/// <summary>
+/// HTML language server configuration options.
+/// </summary>
+public class HtmlOptions
+{
+    /// <summary>
+    /// Enable or disable the HTML language server (vscode-html-language-server).
+    /// Default: true
+    /// </summary>
+    [JsonPropertyName("enable")]
+    public bool? Enable { get; set; }
 }

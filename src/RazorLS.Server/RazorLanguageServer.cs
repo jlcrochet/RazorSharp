@@ -4,6 +4,7 @@ using RazorLS.Dependencies;
 using RazorLS.Protocol;
 using RazorLS.Protocol.Messages;
 using RazorLS.Server.Configuration;
+using RazorLS.Server.Html;
 using RazorLS.Server.Roslyn;
 using RazorLS.Server.Workspace;
 using StreamJsonRpc;
@@ -20,6 +21,7 @@ public class RazorLanguageServer : IAsyncDisposable
     private readonly DependencyManager _dependencyManager;
     private readonly WorkspaceManager _workspaceManager;
     private readonly ConfigurationLoader _configurationLoader;
+    private readonly HtmlLanguageClient _htmlClient;
     private RoslynRawClient? _roslynClient;
     private JsonRpc? _clientRpc;
     private InitializeParams? _initParams;
@@ -40,6 +42,7 @@ public class RazorLanguageServer : IAsyncDisposable
         _dependencyManager = dependencyManager;
         _workspaceManager = new WorkspaceManager(loggerFactory.CreateLogger<WorkspaceManager>());
         _configurationLoader = new ConfigurationLoader(loggerFactory.CreateLogger<ConfigurationLoader>());
+        _htmlClient = new HtmlLanguageClient(loggerFactory.CreateLogger<HtmlLanguageClient>());
     }
 
     /// <summary>
@@ -133,6 +136,23 @@ public class RazorLanguageServer : IAsyncDisposable
 
         _configurationLoader.SetWorkspaceRoot(workspaceRoot);
 
+        // Parse initializationOptions from the editor (e.g., Helix config = { ... })
+        InitializationOptions? initOptions = null;
+        if (@params?.InitializationOptions != null)
+        {
+            try
+            {
+                initOptions = JsonSerializer.Deserialize<InitializationOptions>(
+                    @params.InitializationOptions.Value.GetRawText(), JsonOptions);
+                _logger.LogDebug("Parsed initializationOptions: html.enable={HtmlEnable}",
+                    initOptions?.Html?.Enable);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex, "Failed to parse initializationOptions");
+            }
+        }
+
         // Start Roslyn
         _roslynClient = new RoslynRawClient(_loggerFactory.CreateLogger<RoslynRawClient>());
         _roslynClient.SetConfigurationLoader(_configurationLoader);
@@ -141,6 +161,10 @@ public class RazorLanguageServer : IAsyncDisposable
             Path.Combine(_dependencyManager.BasePath, "logs"));
 
         await _roslynClient.StartAsync(roslynOptions, ct);
+
+        // Start HTML language server for HTML formatting support
+        await _htmlClient.StartAsync(initOptions?.Html, ct);
+        await _htmlClient.InitializeAsync(@params?.RootUri, ct);
 
         // Wire up Roslyn notifications
         _roslynClient.NotificationReceived += OnRoslynNotification;
@@ -221,6 +245,7 @@ public class RazorLanguageServer : IAsyncDisposable
         try
         {
             _roslynClient?.DisposeAsync().AsTask().Wait(100);
+            _htmlClient.DisposeAsync().AsTask().Wait(100);
         }
         catch
         {
@@ -343,12 +368,190 @@ public class RazorLanguageServer : IAsyncDisposable
         => ForwardToRoslynAsync(LspMethods.TextDocumentDocumentSymbol, @params, ct);
 
     [JsonRpcMethod(LspMethods.TextDocumentCodeAction, UseSingleObjectParameterDeserialization = true)]
-    public Task<JsonElement?> HandleCodeActionAsync(JsonElement @params, CancellationToken ct)
-        => ForwardToRoslynAsync(LspMethods.TextDocumentCodeAction, @params, ct);
+    public async Task<JsonElement?> HandleCodeActionAsync(JsonElement @params, CancellationToken ct)
+    {
+        _logger.LogDebug("Forwarding textDocument/codeAction to Roslyn");
+        var result = await ForwardToRoslynAsync(LspMethods.TextDocumentCodeAction, @params, ct);
+
+        // Transform code actions to expand nested actions for editors that don't support them
+        // Also pre-resolve actions that need resolution (have data but no edit)
+        if (result.HasValue)
+        {
+            var expanded = await ExpandAndResolveCodeActionsAsync(result.Value, ct);
+            return expanded;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Expands nested code actions into top-level actions and pre-resolves them.
+    /// Roslyn uses roslyn.client.nestedCodeAction commands for grouped actions,
+    /// but many editors don't support this pattern. We flatten the structure
+    /// and resolve actions that have data but no edit (since Helix doesn't call codeAction/resolve).
+    /// </summary>
+    private async Task<JsonElement> ExpandAndResolveCodeActionsAsync(JsonElement codeActions, CancellationToken ct)
+    {
+        if (codeActions.ValueKind != JsonValueKind.Array)
+        {
+            _logger.LogDebug("codeAction response is not an array, returning as-is");
+            return codeActions;
+        }
+
+        var originalCount = codeActions.GetArrayLength();
+        _logger.LogDebug("Processing {Count} code actions from Roslyn", originalCount);
+
+        var expandedActions = new List<JsonElement>();
+        var nestedCount = 0;
+
+        foreach (var action in codeActions.EnumerateArray())
+        {
+            var title = action.TryGetProperty("title", out var titleProp) ? titleProp.GetString() : "(no title)";
+
+            // Check if this action has a roslyn.client.nestedCodeAction command
+            if (action.TryGetProperty("command", out var command) &&
+                command.TryGetProperty("command", out var commandName) &&
+                commandName.GetString() == "roslyn.client.nestedCodeAction" &&
+                command.TryGetProperty("arguments", out var arguments) &&
+                arguments.GetArrayLength() > 0)
+            {
+                nestedCount++;
+                var arg = arguments[0];
+                if (arg.TryGetProperty("NestedCodeActions", out var nestedActions))
+                {
+                    var nestedActionCount = nestedActions.GetArrayLength();
+                    _logger.LogDebug("Expanding nested action '{Title}' with {Count} sub-actions", title, nestedActionCount);
+
+                    // Get the parent title for prefixing
+                    var parentTitle = title ?? "";
+
+                    // Expand each nested action as a top-level action
+                    foreach (var nested in nestedActions.EnumerateArray())
+                    {
+                        // Get the nested action's title
+                        var nestedTitle = nested.TryGetProperty("title", out var nestedTitleProp)
+                            ? nestedTitleProp.GetString() ?? ""
+                            : "";
+
+                        // Use nested title as-is if it already contains the parent context,
+                        // otherwise prefix with parent title
+                        var fullTitle = nestedTitle.Contains(parentTitle, StringComparison.OrdinalIgnoreCase)
+                            ? nestedTitle
+                            : (string.IsNullOrEmpty(parentTitle) ? nestedTitle : $"{parentTitle}: {nestedTitle}");
+
+                        // Check if action needs resolution (has data but no edit)
+                        var hasEdit = nested.TryGetProperty("edit", out _);
+                        var hasData = nested.TryGetProperty("data", out _);
+
+                        JsonElement finalAction;
+                        if (!hasEdit && hasData)
+                        {
+                            // Pre-resolve the action to get the edit
+                            _logger.LogDebug("  Pre-resolving action: {Title}", fullTitle);
+                            var resolved = await ForwardToRoslynAsync(LspMethods.CodeActionResolve, nested, ct);
+                            if (resolved.HasValue)
+                            {
+                                finalAction = CloneWithNewTitle(resolved.Value, fullTitle);
+                                _logger.LogDebug("  Resolved action: {Title}", fullTitle);
+                            }
+                            else
+                            {
+                                // Resolution failed, use original
+                                finalAction = CloneWithNewTitle(nested, fullTitle);
+                                _logger.LogWarning("  Failed to resolve action: {Title}", fullTitle);
+                            }
+                        }
+                        else
+                        {
+                            // Already has edit or no data, use as-is
+                            finalAction = CloneWithNewTitle(nested, fullTitle);
+                        }
+
+                        expandedActions.Add(finalAction);
+                        _logger.LogDebug("  Added expanded action: {Title}", fullTitle);
+                    }
+                }
+                else
+                {
+                    _logger.LogDebug("Nested action '{Title}' has no NestedCodeActions, keeping original", title);
+                    expandedActions.Add(action);
+                }
+            }
+            else
+            {
+                // Not a nested action - check if it needs resolution
+                var hasEdit = action.TryGetProperty("edit", out _);
+                var hasData = action.TryGetProperty("data", out _);
+
+                if (!hasEdit && hasData)
+                {
+                    // Pre-resolve the action
+                    _logger.LogDebug("Pre-resolving non-nested action: {Title}", title);
+                    var resolved = await ForwardToRoslynAsync(LspMethods.CodeActionResolve, action, ct);
+                    if (resolved.HasValue)
+                    {
+                        expandedActions.Add(resolved.Value);
+                    }
+                    else
+                    {
+                        expandedActions.Add(action);
+                    }
+                }
+                else
+                {
+                    expandedActions.Add(action);
+                }
+            }
+        }
+
+        _logger.LogDebug("Expanded {NestedCount} nested actions, returning {TotalCount} total actions", nestedCount, expandedActions.Count);
+        return JsonSerializer.SerializeToElement(expandedActions, JsonOptions);
+    }
+
+    /// <summary>
+    /// Creates a copy of a code action with a new title.
+    /// </summary>
+    private static JsonElement CloneWithNewTitle(JsonElement action, string newTitle)
+    {
+        var dict = new Dictionary<string, JsonElement>();
+
+        foreach (var prop in action.EnumerateObject())
+        {
+            if (prop.Name == "title")
+            {
+                dict["title"] = JsonSerializer.SerializeToElement(newTitle);
+            }
+            else
+            {
+                dict[prop.Name] = prop.Value.Clone();
+            }
+        }
+
+        return JsonSerializer.SerializeToElement(dict);
+    }
 
     [JsonRpcMethod(LspMethods.CodeActionResolve, UseSingleObjectParameterDeserialization = true)]
-    public Task<JsonElement?> HandleCodeActionResolveAsync(JsonElement @params, CancellationToken ct)
-        => ForwardToRoslynAsync(LspMethods.CodeActionResolve, @params, ct);
+    public async Task<JsonElement?> HandleCodeActionResolveAsync(JsonElement @params, CancellationToken ct)
+    {
+        var title = @params.TryGetProperty("title", out var titleProp) ? titleProp.GetString() : "(no title)";
+        _logger.LogDebug("Resolving code action: {Title}", title);
+
+        var result = await ForwardToRoslynAsync(LspMethods.CodeActionResolve, @params, ct);
+
+        if (result.HasValue)
+        {
+            var hasEdit = result.Value.TryGetProperty("edit", out _);
+            var hasCommand = result.Value.TryGetProperty("command", out var cmd);
+            var cmdName = hasCommand && cmd.TryGetProperty("command", out var cmdNameProp) ? cmdNameProp.GetString() : null;
+            _logger.LogDebug("Resolved code action - hasEdit: {HasEdit}, hasCommand: {HasCommand}, commandName: {CmdName}", hasEdit, hasCommand, cmdName);
+        }
+        else
+        {
+            _logger.LogDebug("Code action resolve returned null");
+        }
+
+        return result;
+    }
 
     [JsonRpcMethod(LspMethods.TextDocumentFormatting, UseSingleObjectParameterDeserialization = true)]
     public Task<JsonElement?> HandleFormattingAsync(JsonElement @params, CancellationToken ct)
@@ -399,8 +602,160 @@ public class RazorLanguageServer : IAsyncDisposable
         => ForwardToRoslynAsync(LspMethods.WorkspaceSymbol, @params, ct);
 
     [JsonRpcMethod(LspMethods.WorkspaceExecuteCommand, UseSingleObjectParameterDeserialization = true)]
-    public Task<JsonElement?> HandleExecuteCommandAsync(JsonElement @params, CancellationToken ct)
-        => ForwardToRoslynAsync(LspMethods.WorkspaceExecuteCommand, @params, ct);
+    public async Task<JsonElement?> HandleExecuteCommandAsync(JsonElement @params, CancellationToken ct)
+    {
+        // Check if this is a roslyn.client.* command that we need to handle
+        if (@params.TryGetProperty("command", out var commandProp))
+        {
+            var command = commandProp.GetString();
+            if (command != null && command.StartsWith("roslyn.client."))
+            {
+                return await HandleRoslynClientCommandAsync(command, @params, ct);
+            }
+        }
+
+        // Forward other commands to Roslyn
+        return await ForwardToRoslynAsync(LspMethods.WorkspaceExecuteCommand, @params, ct);
+    }
+
+    /// <summary>
+    /// Handles roslyn.client.* commands that Roslyn expects the client to process.
+    /// </summary>
+    private async Task<JsonElement?> HandleRoslynClientCommandAsync(string command, JsonElement @params, CancellationToken ct)
+    {
+        _logger.LogDebug("Handling Roslyn client command: {Command}", command);
+
+        switch (command)
+        {
+            case "roslyn.client.nestedCodeAction":
+                return await HandleNestedCodeActionAsync(@params, ct);
+
+            case "roslyn.client.fixAllCodeAction":
+                // Fix All actions need special handling - forward to Roslyn's fix all resolver
+                return await HandleFixAllCodeActionAsync(@params, ct);
+
+            case "roslyn.client.completionComplexEdit":
+                // Complex completion edits - these should be handled by the editor
+                // We can't do much here as they require cursor positioning
+                _logger.LogDebug("completionComplexEdit: Ignoring (editor should handle)");
+                return null;
+
+            default:
+                _logger.LogWarning("Unknown Roslyn client command: {Command}", command);
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Handles roslyn.client.nestedCodeAction by resolving the selected nested action.
+    /// The arguments contain NestedCodeActions array - we take the first one (user's selection)
+    /// and resolve it to get the workspace edit.
+    /// </summary>
+    private async Task<JsonElement?> HandleNestedCodeActionAsync(JsonElement @params, CancellationToken ct)
+    {
+        try
+        {
+            // Extract arguments from the command params
+            if (!@params.TryGetProperty("arguments", out var arguments) ||
+                arguments.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("nestedCodeAction: No arguments provided");
+                return null;
+            }
+
+            var arg = arguments[0];
+
+            // Get the nested code actions
+            if (!arg.TryGetProperty("NestedCodeActions", out var nestedActions) ||
+                nestedActions.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("nestedCodeAction: No NestedCodeActions in arguments");
+                return null;
+            }
+
+            // For now, take the first nested action
+            // In a proper implementation, we'd ask the user to choose,
+            // but since we're a proxy, we'll just take the first one
+            // The editor has already selected which action to execute
+            var selectedAction = nestedActions[0];
+
+            _logger.LogDebug("nestedCodeAction: Resolving first nested action");
+
+            // Resolve the code action to get the workspace edit
+            var resolveResult = await ForwardToRoslynAsync(LspMethods.CodeActionResolve, selectedAction, ct);
+
+            if (resolveResult.HasValue && resolveResult.Value.TryGetProperty("edit", out var edit))
+            {
+                // Apply the workspace edit via the client
+                _logger.LogDebug("nestedCodeAction: Applying workspace edit");
+                await _clientRpc!.NotifyAsync(LspMethods.WorkspaceApplyEdit, new { edit });
+                return JsonSerializer.SerializeToElement(new { success = true }, JsonOptions);
+            }
+
+            _logger.LogWarning("nestedCodeAction: No edit in resolved action");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling nestedCodeAction");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Handles roslyn.client.fixAllCodeAction by resolving through codeAction/resolveFixAll.
+    /// </summary>
+    private async Task<JsonElement?> HandleFixAllCodeActionAsync(JsonElement @params, CancellationToken ct)
+    {
+        try
+        {
+            // Extract arguments from the command params
+            if (!@params.TryGetProperty("arguments", out var arguments) ||
+                arguments.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("fixAllCodeAction: No arguments provided");
+                return null;
+            }
+
+            var arg = arguments[0];
+
+            // The argument should contain the code action to resolve with fix all scope
+            // We'll take the first FixAllFlavors scope if available
+            if (arg.TryGetProperty("FixAllFlavors", out var flavors) &&
+                flavors.GetArrayLength() > 0)
+            {
+                var scope = flavors[0].GetString() ?? "document";
+                _logger.LogDebug("fixAllCodeAction: Using scope {Scope}", scope);
+
+                // Create resolve request with the scope
+                var resolveParams = new Dictionary<string, object?>
+                {
+                    ["codeAction"] = JsonSerializer.Deserialize<object>(arg.GetRawText()),
+                    ["scope"] = scope
+                };
+
+                var resolveResult = await ForwardToRoslynAsync(
+                    "codeAction/resolveFixAll",
+                    JsonSerializer.SerializeToElement(resolveParams, JsonOptions),
+                    ct);
+
+                if (resolveResult.HasValue && resolveResult.Value.TryGetProperty("edit", out var edit))
+                {
+                    _logger.LogDebug("fixAllCodeAction: Applying workspace edit");
+                    await _clientRpc!.NotifyAsync(LspMethods.WorkspaceApplyEdit, new { edit });
+                    return JsonSerializer.SerializeToElement(new { success = true }, JsonOptions);
+                }
+            }
+
+            _logger.LogWarning("fixAllCodeAction: Could not resolve fix all action");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling fixAllCodeAction");
+            return null;
+        }
+    }
 
     [JsonRpcMethod(LspMethods.TextDocumentDiagnostic, UseSingleObjectParameterDeserialization = true)]
     public async Task<JsonElement?> HandleDiagnosticAsync(JsonElement @params, CancellationToken ct)
@@ -484,6 +839,24 @@ public class RazorLanguageServer : IAsyncDisposable
             {
                 return await ForwardRequestToClientAsync(method, @params, ct);
             }
+
+            // Handle razor/updateHtml - sync HTML projection to HTML LS
+            if (method == LspMethods.RazorUpdateHtml && @params.HasValue)
+            {
+                await HandleRazorUpdateHtmlAsync(@params.Value);
+                return JsonSerializer.SerializeToElement(new { }, JsonOptions);
+            }
+
+            // Handle HTML formatting requests from Roslyn's Razor extension
+            if (method == LspMethods.TextDocumentFormatting && @params.HasValue)
+            {
+                return await HandleHtmlFormattingRequestAsync(@params.Value, ct);
+            }
+
+            if (method == LspMethods.TextDocumentRangeFormatting && @params.HasValue)
+            {
+                return await HandleHtmlRangeFormattingRequestAsync(@params.Value, ct);
+            }
         }
         catch (Exception ex)
         {
@@ -491,6 +864,186 @@ public class RazorLanguageServer : IAsyncDisposable
         }
 
         return null;
+    }
+
+    private async Task HandleRazorUpdateHtmlAsync(JsonElement @params)
+    {
+        try
+        {
+            var uri = @params.GetProperty("textDocument").GetProperty("uri").GetString();
+            var checksum = @params.GetProperty("checksum").GetString();
+            var text = @params.GetProperty("text").GetString();
+
+            if (uri != null && checksum != null && text != null)
+            {
+                _logger.LogDebug("Updating HTML projection for {Uri}, checksum: {Checksum}, length: {Length}",
+                    uri, checksum, text.Length);
+                await _htmlClient.UpdateHtmlProjectionAsync(uri, checksum, text);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling razor/updateHtml");
+        }
+    }
+
+    private async Task<JsonElement?> HandleHtmlFormattingRequestAsync(JsonElement @params, CancellationToken ct)
+    {
+        try
+        {
+            // Log the full params for debugging
+            _logger.LogDebug("HTML formatting request params: {Params}", @params.ToString());
+
+            // The request from Roslyn contains:
+            // - textDocument.uri: the virtual HTML URI
+            // - checksum: to look up the projection
+            // - request: { textDocument: {...}, options: {...} }
+            var uri = @params.GetProperty("textDocument").GetProperty("uri").GetString();
+            if (uri == null)
+            {
+                _logger.LogDebug("HTML formatting: uri is null");
+                return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+            }
+
+            _logger.LogDebug("HTML formatting request for URI: {Uri}", uri);
+
+            // The URI might be the virtual HTML URI (razorUri + __virtual.html) or just the razor URI
+            var razorUri = uri.EndsWith("__virtual.html") ? uri.Replace("__virtual.html", "") : uri;
+
+            // Get the checksum directly from params (provided by Roslyn)
+            var checksum = @params.TryGetProperty("checksum", out var checksumProp)
+                ? checksumProp.GetString()
+                : null;
+
+            // Get formatting options from the nested request property
+            JsonElement options = default;
+            if (@params.TryGetProperty("request", out var request) &&
+                request.TryGetProperty("options", out var opts))
+            {
+                options = opts;
+            }
+            else if (@params.TryGetProperty("options", out opts))
+            {
+                // Fallback to top-level options if present
+                options = opts;
+            }
+
+            // If we have a checksum, use it directly
+            HtmlProjection? projection = null;
+            if (!string.IsNullOrEmpty(checksum))
+            {
+                projection = _htmlClient.GetProjection(checksum);
+            }
+
+            // Fallback to finding by URI if no checksum or projection not found
+            if (projection == null)
+            {
+                projection = FindProjectionByRazorUri(razorUri);
+            }
+
+            if (projection == null)
+            {
+                _logger.LogDebug("No HTML projection found for {Uri} (checksum: {Checksum})", razorUri, checksum);
+                return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+            }
+
+            _logger.LogDebug("Found HTML projection for {Uri}, checksum: {Checksum}", razorUri, projection.Checksum);
+
+            // Ensure we have valid options to serialize
+            if (options.ValueKind == JsonValueKind.Undefined)
+            {
+                // Create default options
+                options = JsonSerializer.SerializeToElement(new { tabSize = 4, insertSpaces = true }, JsonOptions);
+            }
+
+            var result = await _htmlClient.FormatAsync(razorUri, projection.Checksum, options, ct);
+            _logger.LogDebug("HTML formatting result: {Result}", result?.ToString() ?? "null");
+            return result ?? JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling HTML formatting request");
+            return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+        }
+    }
+
+    private async Task<JsonElement?> HandleHtmlRangeFormattingRequestAsync(JsonElement @params, CancellationToken ct)
+    {
+        try
+        {
+            var uri = @params.GetProperty("textDocument").GetProperty("uri").GetString();
+            if (uri == null)
+            {
+                return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+            }
+
+            var razorUri = uri.EndsWith("__virtual.html") ? uri.Replace("__virtual.html", "") : uri;
+
+            // Get the checksum directly from params (provided by Roslyn)
+            var checksum = @params.TryGetProperty("checksum", out var checksumProp)
+                ? checksumProp.GetString()
+                : null;
+
+            // Get range and options from nested request property
+            JsonElement range = default;
+            JsonElement options = default;
+            if (@params.TryGetProperty("request", out var request))
+            {
+                if (request.TryGetProperty("range", out var r))
+                    range = r;
+                if (request.TryGetProperty("options", out var opts))
+                    options = opts;
+            }
+            else
+            {
+                // Fallback to top-level properties
+                if (@params.TryGetProperty("range", out var r))
+                    range = r;
+                if (@params.TryGetProperty("options", out var opts))
+                    options = opts;
+            }
+
+            // If we have a checksum, use it directly
+            HtmlProjection? projection = null;
+            if (!string.IsNullOrEmpty(checksum))
+            {
+                projection = _htmlClient.GetProjection(checksum);
+            }
+
+            // Fallback to finding by URI if no checksum or projection not found
+            if (projection == null)
+            {
+                projection = FindProjectionByRazorUri(razorUri);
+            }
+
+            if (projection == null)
+            {
+                return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+            }
+
+            // Ensure we have valid options and range to serialize
+            if (options.ValueKind == JsonValueKind.Undefined)
+            {
+                options = JsonSerializer.SerializeToElement(new { tabSize = 4, insertSpaces = true }, JsonOptions);
+            }
+            if (range.ValueKind == JsonValueKind.Undefined)
+            {
+                return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+            }
+
+            var result = await _htmlClient.FormatRangeAsync(razorUri, projection.Checksum, range, options, ct);
+            return result ?? JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling HTML range formatting request");
+            return JsonSerializer.SerializeToElement(Array.Empty<object>(), JsonOptions);
+        }
+    }
+
+    private HtmlProjection? FindProjectionByRazorUri(string razorUri)
+    {
+        return _htmlClient.GetProjectionByRazorUri(razorUri);
     }
 
     private void HandleRazorLog(JsonElement? @params)
@@ -638,6 +1191,10 @@ public class RazorLanguageServer : IAsyncDisposable
                     dynamicRegistration = true,
                     symbolKind = new { valueSet = Enumerable.Range(1, 26).ToArray() }
                 }
+            },
+            window = new
+            {
+                workDoneProgress = true
             },
             textDocument = new
             {
@@ -807,6 +1364,11 @@ public class RazorLanguageServer : IAsyncDisposable
                 DocumentHighlightProvider = true,
                 DocumentSymbolProvider = true,
                 CodeActionProvider = true,
+                ExecuteCommandProvider = new ExecuteCommandOptions
+                {
+                    // Empty array - we forward all commands to Roslyn
+                    Commands = []
+                },
                 DocumentFormattingProvider = true,
                 DocumentRangeFormattingProvider = true,
                 DocumentOnTypeFormattingProvider = new DocumentOnTypeFormattingOptions
@@ -864,6 +1426,8 @@ public class RazorLanguageServer : IAsyncDisposable
         {
             await _roslynClient.DisposeAsync();
         }
+
+        await _htmlClient.DisposeAsync();
 
         _clientRpc?.Dispose();
     }

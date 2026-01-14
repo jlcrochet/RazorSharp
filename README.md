@@ -198,6 +198,34 @@ You can also set `OMNISHARPHOME` environment variable to specify a custom global
 | `RoslynExtensionsOptions.inlayHintsOptions` | Parameter and type hint settings |
 | `RenameOptions` | Rename refactoring behavior |
 
+### HTML Language Server
+
+RazorLS uses `vscode-html-language-server` for HTML formatting in Razor files. Install it with:
+
+```bash
+npm install -g vscode-langservers-extracted
+```
+
+The HTML language server is enabled by default. To disable it, configure your editor's LSP `initializationOptions`:
+
+#### Helix
+
+```toml
+[language-server.razorls]
+command = "razorls"
+config = { html = { enable = false } }
+```
+
+#### Neovim
+
+```lua
+lspconfig.razorls.setup({
+  init_options = {
+    html = { enable = false }
+  }
+})
+```
+
 ## Architecture
 
 RazorLS acts as a proxy between your editor and the Roslyn Language Server:
@@ -208,8 +236,9 @@ Editor (LSP client)
     v (stdin/stdout)
 RazorLS
     |
-    v
-Roslyn Language Server (C#/Razor features)
+    +---> Roslyn Language Server (C#/Razor features)
+    |
+    +---> HTML Language Server (HTML formatting, optional)
 ```
 
 On first run, RazorLS automatically downloads the required Roslyn and Razor extension dependencies from the VS Code C# extension.
