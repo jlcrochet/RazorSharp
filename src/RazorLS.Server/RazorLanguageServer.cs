@@ -1398,36 +1398,8 @@ public class RazorLanguageServer : IAsyncDisposable
         {
             _logger.LogDebug("Starting Roslyn warm-up...");
 
-            // Find a file to warm up with - prefer .razor, then .cs
-            string? warmUpFile = null;
-
-            // Look for .razor files first
-            var razorFiles = Directory.GetFiles(_workspaceRoot, "*.razor", SearchOption.AllDirectories)
-                .Take(5) // Limit search
-                .ToArray();
-
-            if (razorFiles.Length > 0)
-            {
-                // Prefer smaller files for faster warm-up
-                warmUpFile = razorFiles
-                    .OrderBy(f => new FileInfo(f).Length)
-                    .First();
-            }
-            else
-            {
-                // Fall back to .cs files
-                var csFiles = Directory.GetFiles(_workspaceRoot, "*.cs", SearchOption.AllDirectories)
-                    .Where(f => !f.Contains("obj") && !f.Contains("bin"))
-                    .Take(5)
-                    .ToArray();
-
-                if (csFiles.Length > 0)
-                {
-                    warmUpFile = csFiles
-                        .OrderBy(f => new FileInfo(f).Length)
-                        .First();
-                }
-            }
+            // Find a .razor or .cs file to warm up with
+            var warmUpFile = FindSourceFile(_workspaceRoot);
 
             if (warmUpFile == null)
             {
@@ -1470,12 +1442,8 @@ public class RazorLanguageServer : IAsyncDisposable
                 JsonSerializer.SerializeToElement(symbolParams, JsonOptions),
                 cts.Token);
 
-            // Close the document
-            var didCloseParams = new
-            {
-                textDocument = new { uri = fileUri }
-            };
-            await _roslynClient.SendNotificationAsync(LspMethods.TextDocumentDidClose, JsonSerializer.SerializeToElement(didCloseParams, JsonOptions));
+            // Don't close the document - if the user opens the same file, their didOpen
+            // will update it. Closing could race with a user's didOpen and cause issues.
 
             _logger.LogInformation("Roslyn warm-up complete");
         }
@@ -1505,5 +1473,30 @@ public class RazorLanguageServer : IAsyncDisposable
         await _htmlClient.DisposeAsync();
 
         _clientRpc?.Dispose();
+    }
+
+    /// <summary>
+    /// Finds the first .razor or .cs file, skipping bin/obj directories.
+    /// </summary>
+    private static string? FindSourceFile(string dir)
+    {
+        // Prefer .razor files
+        var file = Directory.EnumerateFiles(dir, "*.razor").FirstOrDefault()
+                ?? Directory.EnumerateFiles(dir, "*.cs").FirstOrDefault();
+        if (file != null)
+            return file;
+
+        foreach (var subdir in Directory.EnumerateDirectories(dir))
+        {
+            var name = Path.GetFileName(subdir);
+            if (name is "bin" or "obj")
+                continue;
+
+            file = FindSourceFile(subdir);
+            if (file != null)
+                return file;
+        }
+
+        return null;
     }
 }
