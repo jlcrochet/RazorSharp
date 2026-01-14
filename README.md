@@ -15,19 +15,11 @@ By the way, if you're looking for a Tree-sitter parser for Razor files, check ou
 
 ### Pre-built binaries
 
-Download the latest release for your platform from the [Releases](https://github.com/jlcrochet/razorls/releases) page:
-
-| Platform | Download |
-|----------|----------|
-| Linux x64 | `razorls-linux-x64.zip` |
-| Linux ARM64 | `razorls-linux-arm64.zip` |
-| macOS x64 (Intel) | `razorls-osx-x64.zip` |
-| macOS ARM64 (Apple Silicon) | `razorls-osx-arm64.zip` |
-| Windows x64 | `razorls-win-x64.zip` |
+Download `razorls.zip` from the [Releases](https://github.com/jlcrochet/razorls/releases) page. The build is platform-agnostic and works on any OS with .NET installed.
 
 ```bash
 # Extract and install
-unzip razorls-linux-x64.zip -d ~/.local/share/razorls
+unzip razorls.zip -d ~/.local/share/razorls
 # Run with: dotnet ~/.local/share/razorls/razorls.dll
 ```
 
