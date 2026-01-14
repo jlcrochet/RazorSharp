@@ -226,6 +226,8 @@ lspconfig.razorls.setup({
 })
 ```
 
+Disabling the HTML language server may improve startup times but it will break formatting.
+
 ## Architecture
 
 RazorLS acts as a proxy between your editor and the Roslyn Language Server:
