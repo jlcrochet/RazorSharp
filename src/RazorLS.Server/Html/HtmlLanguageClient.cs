@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using RazorLS.Server.Configuration;
@@ -13,17 +14,19 @@ namespace RazorLS.Server.Html;
 /// </summary>
 public class HtmlLanguageClient : IAsyncDisposable
 {
-    private readonly ILogger<HtmlLanguageClient> _logger;
-    private Process? _process;
-    private JsonRpc? _rpc;
-    private bool _initialized;
-    private bool _disposed;
-    private bool _enabled = true;
+    readonly ILogger<HtmlLanguageClient> _logger;
+    Process? _process;
+    JsonRpc? _rpc;
+    bool _initialized;
+    bool _disposed;
+    bool _enabled = true;
 
     // Track HTML projections by checksum (Roslyn uses checksums to identify HTML versions)
-    private readonly ConcurrentDictionary<string, HtmlProjection> _projections = new();
+    readonly ConcurrentDictionary<string, HtmlProjection> _projections = new();
+    // Secondary index for O(1) lookup by Razor URI
+    readonly ConcurrentDictionary<string, string> _razorUriToChecksum = new();
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true
@@ -53,14 +56,18 @@ public class HtmlLanguageClient : IAsyncDisposable
         var serverPath = FindHtmlLanguageServer();
         if (serverPath == null)
         {
-            _logger.LogWarning("HTML language server not found. HTML formatting will be limited. Install with: npm install -g vscode-langservers-extracted");
+            _logger.LogWarning("HTML language server not found. HTML formatting will be limited. Install with: `npm install -g vscode-langservers-extracted` or `pnpm install -g vscode-langservers-extracted` or `yarn global add vscode-langservers-extracted`");
             return;
         }
 
+        // Determine how to run the server:
+        // - .js files: run with node
+        // - Shell scripts (pnpm wrappers) or executables: run directly
+        var isJsFile = serverPath.EndsWith(".js", StringComparison.OrdinalIgnoreCase);
         var psi = new ProcessStartInfo
         {
-            FileName = "node",
-            Arguments = $"\"{serverPath}\" --stdio",
+            FileName = isJsFile ? "node" : serverPath,
+            Arguments = isJsFile ? $"\"{serverPath}\" --stdio" : "--stdio",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -68,7 +75,16 @@ public class HtmlLanguageClient : IAsyncDisposable
             CreateNoWindow = true
         };
 
-        _process = Process.Start(psi);
+        try
+        {
+            _process = Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to start HTML language server. Is Node.js installed?");
+            return;
+        }
+
         if (_process == null)
         {
             _logger.LogError("Failed to start HTML language server");
@@ -149,11 +165,18 @@ public class HtmlLanguageClient : IAsyncDisposable
         {
             // Still store the projection even if HTML LS isn't running
             _projections[checksum] = new HtmlProjection(razorUri, checksum, htmlContent, 1);
+            _razorUriToChecksum[razorUri] = checksum;
             return;
         }
 
         var virtualUri = GetVirtualHtmlUri(razorUri);
-        var existingByUri = _projections.Values.FirstOrDefault(p => p.RazorUri == razorUri);
+
+        // Use secondary index for O(1) lookup
+        HtmlProjection? existingByUri = null;
+        if (_razorUriToChecksum.TryGetValue(razorUri, out var existingChecksum))
+        {
+            _projections.TryGetValue(existingChecksum, out existingByUri);
+        }
 
         if (existingByUri != null)
         {
@@ -161,6 +184,7 @@ public class HtmlLanguageClient : IAsyncDisposable
             var newVersion = existingByUri.Version + 1;
             _projections.TryRemove(existingByUri.Checksum, out _);
             _projections[checksum] = new HtmlProjection(razorUri, checksum, htmlContent, newVersion);
+            _razorUriToChecksum[razorUri] = checksum;
 
             await _rpc.NotifyWithParameterObjectAsync("textDocument/didChange", new
             {
@@ -174,6 +198,7 @@ public class HtmlLanguageClient : IAsyncDisposable
         {
             // Open new document
             _projections[checksum] = new HtmlProjection(razorUri, checksum, htmlContent, 1);
+            _razorUriToChecksum[razorUri] = checksum;
 
             await _rpc.NotifyWithParameterObjectAsync("textDocument/didOpen", new
             {
@@ -292,7 +317,12 @@ public class HtmlLanguageClient : IAsyncDisposable
     /// </summary>
     public HtmlProjection? GetProjectionByRazorUri(string razorUri)
     {
-        return _projections.Values.FirstOrDefault(p => p.RazorUri == razorUri);
+        if (_razorUriToChecksum.TryGetValue(razorUri, out var checksum))
+        {
+            _projections.TryGetValue(checksum, out var projection);
+            return projection;
+        }
+        return null;
     }
 
     private static string GetVirtualHtmlUri(string razorUri)
@@ -302,21 +332,34 @@ public class HtmlLanguageClient : IAsyncDisposable
 
     private static string? FindHtmlLanguageServer()
     {
-        var possiblePaths = new[]
+        var possiblePaths = new List<string>();
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            // Global npm install
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".npm-global", "lib", "node_modules", "vscode-langservers-extracted", "bin", "vscode-html-language-server"),
-            // npm prefix (common on Linux)
-            "/usr/local/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
-            "/usr/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
-            // Yarn global
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".yarn", "bin", "vscode-html-language-server"),
-            // pnpm global
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".local", "share", "pnpm", "vscode-html-language-server"),
-        };
+            // Windows: npm global install location
+            possiblePaths.Add(Path.Combine(appData, "npm", "node_modules",
+                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            // Windows: yarn global
+            possiblePaths.Add(Path.Combine(appData, "yarn", "global", "node_modules",
+                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            // Windows: pnpm global
+            possiblePaths.Add(Path.Combine(appData, "pnpm", "global", "5", "node_modules",
+                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+        }
+        else
+        {
+            // Unix: npm global install locations
+            possiblePaths.Add(Path.Combine(userProfile, ".npm-global", "lib", "node_modules",
+                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            possiblePaths.Add("/usr/local/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server");
+            possiblePaths.Add("/usr/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server");
+            // Unix: yarn global
+            possiblePaths.Add(Path.Combine(userProfile, ".yarn", "bin", "vscode-html-language-server"));
+            // Unix: pnpm global
+            possiblePaths.Add(Path.Combine(userProfile, ".local", "share", "pnpm", "vscode-html-language-server"));
+        }
 
         foreach (var path in possiblePaths)
         {
@@ -324,19 +367,30 @@ public class HtmlLanguageClient : IAsyncDisposable
             {
                 return path;
             }
+            // Check for .js extension (Windows npm shims)
             var jsPath = path + ".js";
             if (File.Exists(jsPath))
             {
                 return jsPath;
             }
+            // Check for .cmd extension (Windows)
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                var cmdPath = path + ".cmd";
+                if (File.Exists(cmdPath))
+                {
+                    return cmdPath;
+                }
+            }
         }
 
-        // Try to find via 'which' command on Unix
+        // Try to find via PATH using platform-specific command
         try
         {
+            var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
             var psi = new ProcessStartInfo
             {
-                FileName = "which",
+                FileName = isWindows ? "where" : "which",
                 Arguments = "vscode-html-language-server",
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -349,13 +403,15 @@ public class HtmlLanguageClient : IAsyncDisposable
                 process.WaitForExit();
                 if (process.ExitCode == 0 && !string.IsNullOrEmpty(output))
                 {
-                    return output;
+                    // 'where' on Windows may return multiple lines; take the first
+                    var firstLine = output.Split(['\r', '\n'], 2, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                    return firstLine;
                 }
             }
         }
         catch
         {
-            // Ignore
+            // Ignore - command not found or other error
         }
 
         return null;

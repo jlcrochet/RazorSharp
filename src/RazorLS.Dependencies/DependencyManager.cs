@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -10,13 +11,20 @@ namespace RazorLS.Dependencies;
 /// </summary>
 public class DependencyManager
 {
-    private readonly ILogger<DependencyManager> _logger;
-    private readonly string _basePath;
-    private readonly HttpClient _httpClient;
-    private readonly bool _skipDependencyCheck;
+    readonly ILogger<DependencyManager> _logger;
+    readonly string _basePath;
+    readonly HttpClient _httpClient;
+    readonly bool _skipDependencyCheck;
 
     // VS Code C# extension version - update this when newer versions are available
-    private const string ExtensionVersion = "2.111.2";
+    const string ExtensionVersion = "2.111.2";
+
+    private static string GetVersion()
+    {
+        var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
+        var version = assembly.GetName().Version;
+        return version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "0.0.0";
+    }
 
     public DependencyManager(ILogger<DependencyManager> logger, string? basePath = null, bool skipDependencyCheck = false)
     {
@@ -24,7 +32,7 @@ public class DependencyManager
         _basePath = basePath ?? GetDefaultBasePath();
         _skipDependencyCheck = skipDependencyCheck;
         _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "RazorLS/0.1.0");
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", $"RazorLS/{GetVersion()}");
     }
 
     public string BasePath => _basePath;
@@ -238,14 +246,23 @@ public class DependencyManager
 
     private static string GetDefaultBasePath()
     {
-        // Use XDG_CACHE_HOME if set, otherwise ~/.cache
+        // Use XDG_CACHE_HOME if set (Linux/macOS)
         var cacheDir = Environment.GetEnvironmentVariable("XDG_CACHE_HOME");
-        if (string.IsNullOrEmpty(cacheDir))
+        if (!string.IsNullOrEmpty(cacheDir))
         {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            cacheDir = Path.Combine(home, ".cache");
+            return Path.Combine(cacheDir, "razorls");
         }
-        return Path.Combine(cacheDir, "razorls");
+
+        // On Windows, use LocalApplicationData
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            return Path.Combine(localAppData, "razorls");
+        }
+
+        // Linux/macOS fallback: ~/.cache
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return Path.Combine(home, ".cache", "razorls");
     }
 
     private DependencyVersionInfo? GetInstalledVersion()

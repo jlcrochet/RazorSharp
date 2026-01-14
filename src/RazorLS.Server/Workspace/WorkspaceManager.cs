@@ -7,7 +7,7 @@ namespace RazorLS.Server.Workspace;
 /// </summary>
 public class WorkspaceManager
 {
-    private readonly ILogger<WorkspaceManager> _logger;
+    readonly ILogger<WorkspaceManager> _logger;
 
     public WorkspaceManager(ILogger<WorkspaceManager> logger)
     {
@@ -49,29 +49,20 @@ public class WorkspaceManager
     {
         if (!Directory.Exists(rootPath))
         {
-            return Array.Empty<string>();
+            return [];
         }
-
-        var projects = new List<string>();
 
         try
         {
-            // Look for .csproj, .fsproj, .vbproj files
-            var projectExtensions = new[] { "*.csproj", "*.fsproj", "*.vbproj" };
-
-            foreach (var pattern in projectExtensions)
-            {
-                var files = Directory.GetFiles(rootPath, pattern, SearchOption.AllDirectories);
-                projects.AddRange(files);
-            }
+            var projects = Directory.GetFiles(rootPath, "*.csproj", SearchOption.AllDirectories);
+            _logger.LogDebug("Found {Count} projects in {Path}", projects.Length, rootPath);
+            return projects;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error searching for projects in {Path}", rootPath);
+            return [];
         }
-
-        _logger.LogDebug("Found {Count} projects in {Path}", projects.Count, rootPath);
-        return projects.ToArray();
     }
 
     /// <summary>

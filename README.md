@@ -200,10 +200,14 @@ You can also set `OMNISHARPHOME` environment variable to specify a custom global
 
 ### HTML Language Server
 
-RazorLS uses `vscode-html-language-server` for HTML formatting in Razor files. Install it with:
+RazorLS uses `vscode-html-language-server` for HTML formatting in Razor files. This requires Node.js to be installed. Install the language server with:
 
 ```bash
 npm install -g vscode-langservers-extracted
+# or
+pnpm install -g vscode-langservers-extracted
+# or
+yarn global add vscode-langservers-extracted
 ```
 
 The HTML language server is enabled by default. To disable it, configure your editor's LSP `initializationOptions`:
@@ -248,8 +252,8 @@ On first run, RazorLS automatically downloads the required Roslyn and Razor exte
 ## Dependencies Cache
 
 Downloaded dependencies are stored in:
-- Linux/macOS: `~/.cache/razorls/`
-- Or `$XDG_CACHE_HOME/razorls/`
+- Linux/macOS: `~/.cache/razorls/` (or `$XDG_CACHE_HOME/razorls/`)
+- Windows: `%LOCALAPPDATA%\razorls\`
 
 ## License
 

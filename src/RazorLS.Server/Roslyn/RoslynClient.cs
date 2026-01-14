@@ -16,7 +16,7 @@ public record RoslynStartOptions
     public required string RazorDesignTimePath { get; init; }
     public required string RazorExtensionPath { get; init; }
     public string? LogDirectory { get; init; }
-    public string LogLevel { get; init; } = "Debug";
+    public string LogLevel { get; init; } = "Information";
 }
 
 /// <summary>
@@ -33,10 +33,10 @@ public class RoslynNotificationEventArgs : EventArgs
 /// </summary>
 public class RoslynClient : IAsyncDisposable
 {
-    private readonly ILogger<RoslynClient> _logger;
-    private Process? _process;
-    private JsonRpc? _rpc;
-    private bool _disposed;
+    readonly ILogger<RoslynClient> _logger;
+    Process? _process;
+    JsonRpc? _rpc;
+    bool _disposed;
 
     public event EventHandler<RoslynNotificationEventArgs>? NotificationReceived;
     public event Func<string, JsonElement?, CancellationToken, Task<JsonElement?>>? RequestReceived;
@@ -225,7 +225,7 @@ public class RoslynClient : IAsyncDisposable
         }
     }
 
-    private static string[] BuildCommandLineArgs(RoslynStartOptions options)
+    private static List<string> BuildCommandLineArgs(RoslynStartOptions options)
     {
         var args = new List<string>
         {
@@ -241,7 +241,7 @@ public class RoslynClient : IAsyncDisposable
             args.Add($"--extensionLogDirectory={options.LogDirectory}");
         }
 
-        return args.ToArray();
+        return args;
     }
 
     public ValueTask DisposeAsync()
@@ -273,7 +273,7 @@ public class RoslynClient : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    public static RoslynStartOptions CreateStartOptions(DependencyManager deps, string? logDirectory = null)
+    public static RoslynStartOptions CreateStartOptions(DependencyManager deps, string? logDirectory = null, string? logLevel = null)
     {
         return new RoslynStartOptions
         {
@@ -281,7 +281,8 @@ public class RoslynClient : IAsyncDisposable
             RazorSourceGeneratorPath = deps.RazorSourceGeneratorPath,
             RazorDesignTimePath = deps.RazorDesignTimePath,
             RazorExtensionPath = deps.RazorExtensionDllPath,
-            LogDirectory = logDirectory
+            LogDirectory = logDirectory,
+            LogLevel = logLevel ?? "Information"
         };
     }
 }
@@ -291,7 +292,7 @@ public class RoslynClient : IAsyncDisposable
 /// </summary>
 internal class RoslynNotificationTarget
 {
-    private readonly RoslynClient _client;
+    readonly RoslynClient _client;
 
     public RoslynNotificationTarget(RoslynClient client)
     {
@@ -401,7 +402,7 @@ internal class RoslynNotificationTarget
             }
             return results.ToArray();
         }
-        return Array.Empty<object?>();
+        return [];
     }
 
     // Roslyn may send requests that need responses (reverse direction)
@@ -484,7 +485,7 @@ internal class RoslynNotificationTarget
 /// </summary>
 internal class RpcTraceListener : System.Diagnostics.TraceListener
 {
-    private readonly ILogger _logger;
+    readonly ILogger _logger;
 
     public RpcTraceListener(ILogger logger)
     {

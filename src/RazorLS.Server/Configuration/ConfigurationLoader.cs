@@ -12,14 +12,14 @@ namespace RazorLS.Server.Configuration;
 /// </summary>
 public class ConfigurationLoader
 {
-    private const string ConfigFileName = "omnisharp.json";
-    private const string GlobalConfigDirName = ".omnisharp";
+    const string ConfigFileName = "omnisharp.json";
+    const string GlobalConfigDirName = ".omnisharp";
 
-    private readonly ILogger<ConfigurationLoader> _logger;
-    private OmniSharpConfiguration _configuration = new();
-    private string? _workspaceRoot;
+    readonly ILogger<ConfigurationLoader> _logger;
+    OmniSharpConfiguration _configuration = new();
+    string? _workspaceRoot;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         ReadCommentHandling = JsonCommentHandling.Skip,

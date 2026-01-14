@@ -14,14 +14,14 @@ namespace RazorLS.Server.Roslyn;
 /// </summary>
 public class RoslynRawClient : IAsyncDisposable
 {
-    private readonly ILogger<RoslynRawClient> _logger;
-    private Process? _process;
-    private bool _disposed;
-    private CancellationTokenSource? _readCts;
-    private Task? _readTask;
-    private long _nextId = 0;
-    private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement?>> _pendingRequests = new();
-    private ConfigurationLoader? _configurationLoader;
+    readonly ILogger<RoslynRawClient> _logger;
+    Process? _process;
+    bool _disposed;
+    CancellationTokenSource? _readCts;
+    Task? _readTask;
+    long _nextId = 0;
+    readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement?>> _pendingRequests = new();
+    ConfigurationLoader? _configurationLoader;
 
     public event EventHandler<RoslynNotificationEventArgs>? NotificationReceived;
     public event Func<string, JsonElement?, long, CancellationToken, Task<JsonElement?>>? RequestReceived;
@@ -98,7 +98,6 @@ public class RoslynRawClient : IAsyncDisposable
         var buffer = new byte[65536];
         var messageBuffer = new MemoryStream();
         int contentLength = -1;
-        var headerBuffer = new StringBuilder();
 
         try
         {
@@ -110,7 +109,7 @@ public class RoslynRawClient : IAsyncDisposable
                 messageBuffer.Write(buffer, 0, bytesRead);
 
                 // Try to parse complete messages from buffer
-                while (TryParseMessage(messageBuffer, ref contentLength, headerBuffer, out var message))
+                while (TryParseMessage(messageBuffer, ref contentLength, out var message))
                 {
                     if (message != null)
                     {
@@ -126,15 +125,16 @@ public class RoslynRawClient : IAsyncDisposable
         }
     }
 
-    private bool TryParseMessage(MemoryStream buffer, ref int contentLength, StringBuilder headerBuffer, out JsonDocument? message)
+    private bool TryParseMessage(MemoryStream buffer, ref int contentLength, out JsonDocument? message)
     {
         message = null;
-        var data = buffer.ToArray();
+        var data = buffer.GetBuffer();
+        var dataLength = (int)buffer.Length;
 
         // If we don't have content length yet, look for headers
         if (contentLength < 0)
         {
-            var str = Encoding.UTF8.GetString(data);
+            var str = Encoding.UTF8.GetString(data, 0, dataLength);
             var headerEnd = str.IndexOf("\r\n\r\n", StringComparison.Ordinal);
             if (headerEnd < 0) return false;
 
@@ -150,24 +150,29 @@ public class RoslynRawClient : IAsyncDisposable
 
             if (contentLength < 0) return false;
 
-            // Remove headers from buffer
-            var remaining = data.Skip(headerEnd + 4).ToArray();
+            // Remove headers from buffer - write directly with offset
+            var contentStart = headerEnd + 4;
+            var remainingLength = dataLength - contentStart;
             buffer.SetLength(0);
-            buffer.Write(remaining, 0, remaining.Length);
-            data = remaining;
+            buffer.Write(data, contentStart, remainingLength);
+            data = buffer.GetBuffer();
+            dataLength = remainingLength;
         }
 
         // Check if we have complete content
-        if (data.Length < contentLength) return false;
+        if (dataLength < contentLength) return false;
 
         // Parse JSON content
         var json = Encoding.UTF8.GetString(data, 0, contentLength);
         message = JsonDocument.Parse(json);
 
-        // Remove processed content from buffer
-        var rest = data.Skip(contentLength).ToArray();
+        // Remove processed content from buffer - write directly with offset
+        var restLength = dataLength - contentLength;
         buffer.SetLength(0);
-        buffer.Write(rest, 0, rest.Length);
+        if (restLength > 0)
+        {
+            buffer.Write(data, contentLength, restLength);
+        }
         contentLength = -1;
 
         return true;
@@ -273,7 +278,7 @@ public class RoslynRawClient : IAsyncDisposable
 
     private object?[] HandleWorkspaceConfiguration(JsonElement? @params)
     {
-        if (@params == null) return Array.Empty<object?>();
+        if (@params == null) return [];
 
         _logger.LogDebug("workspace/configuration request received");
 
@@ -309,7 +314,7 @@ public class RoslynRawClient : IAsyncDisposable
             }
             return results.ToArray();
         }
-        return Array.Empty<object?>();
+        return [];
     }
 
     public async Task<TResponse?> SendRequestAsync<TRequest, TResponse>(
@@ -474,7 +479,7 @@ public class RoslynRawClient : IAsyncDisposable
         await stream.FlushAsync();
     }
 
-    private static string[] BuildCommandLineArgs(RoslynStartOptions options)
+    private static List<string> BuildCommandLineArgs(RoslynStartOptions options)
     {
         var args = new List<string>
         {
@@ -490,7 +495,7 @@ public class RoslynRawClient : IAsyncDisposable
             args.Add($"--extensionLogDirectory={options.LogDirectory}");
         }
 
-        return args.ToArray();
+        return args;
     }
 
     public ValueTask DisposeAsync()
@@ -518,7 +523,7 @@ public class RoslynRawClient : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    public static RoslynStartOptions CreateStartOptions(DependencyManager deps, string? logDirectory = null)
+    public static RoslynStartOptions CreateStartOptions(DependencyManager deps, string? logDirectory = null, string? logLevel = null)
     {
         return new RoslynStartOptions
         {
@@ -526,7 +531,8 @@ public class RoslynRawClient : IAsyncDisposable
             RazorSourceGeneratorPath = deps.RazorSourceGeneratorPath,
             RazorDesignTimePath = deps.RazorDesignTimePath,
             RazorExtensionPath = deps.RazorExtensionDllPath,
-            LogDirectory = logDirectory
+            LogDirectory = logDirectory,
+            LogLevel = logLevel ?? "Information"
         };
     }
 }

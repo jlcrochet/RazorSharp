@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RazorLS.Dependencies;
@@ -45,7 +46,9 @@ for (int i = 0; i < args.Length; i++)
             PrintHelp();
             return 0;
         case "--version":
-            Console.WriteLine("RazorLS 0.1.0");
+            var version = Assembly.GetExecutingAssembly().GetName().Version;
+            var versionStr = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "0.0.0";
+            Console.WriteLine($"RazorLS {versionStr}");
             return 0;
     }
 }
@@ -78,6 +81,7 @@ var serviceProvider = services.BuildServiceProvider();
 
 // Run the server
 var server = serviceProvider.GetRequiredService<RazorLanguageServer>();
+server.SetLogLevel(logLevel);
 if (solutionPath != null)
 {
     server.SetSolutionPath(solutionPath);
@@ -158,7 +162,7 @@ internal class StderrLoggerProvider : ILoggerProvider
 
 internal class StderrLogger : ILogger
 {
-    private readonly string _category;
+    readonly string _category;
     public StderrLogger(string category) => _category = category;
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
     public bool IsEnabled(LogLevel logLevel) => true;
@@ -176,8 +180,8 @@ internal class StderrLogger : ILogger
 // Simple file logger provider
 internal class FileLoggerProvider : ILoggerProvider
 {
-    private readonly StreamWriter _writer;
-    private readonly object _lock = new();
+    readonly StreamWriter _writer;
+    readonly object _lock = new();
 
     public FileLoggerProvider(string path)
     {
@@ -195,9 +199,9 @@ internal class FileLoggerProvider : ILoggerProvider
 
 internal class FileLogger : ILogger
 {
-    private readonly string _category;
-    private readonly StreamWriter _writer;
-    private readonly object _lock;
+    readonly string _category;
+    readonly StreamWriter _writer;
+    readonly object _lock;
 
     public FileLogger(string category, StreamWriter writer, object @lock)
     {
@@ -210,7 +214,8 @@ internal class FileLogger : ILogger
     public bool IsEnabled(LogLevel logLevel) => true;
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
-        var shortCategory = _category.Contains('.') ? _category[((_category.LastIndexOf('.') + 1))..] : _category;
+        var dotIndex = _category.LastIndexOf('.');
+        var shortCategory = dotIndex != -1 ? _category.Substring(dotIndex + 1) : _category;
         var line = $"[{DateTime.Now:HH:mm:ss.fff}] [{logLevel}] {shortCategory}: {formatter(state, exception)}";
         lock (_lock)
         {

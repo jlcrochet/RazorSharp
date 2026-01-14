@@ -42,9 +42,14 @@ jobs:
           dotnet-version: '10.0.x'
           dotnet-quality: 'preview'
 
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        shell: bash
+
       - name: Publish
         run: |
-          dotnet publish src/RazorLS.Server -c Release -r ${{ matrix.rid }} -o publish
+          dotnet publish src/RazorLS.Server -c Release -r ${{ matrix.rid }} -o publish -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Rename artifact (Unix)
         if: runner.os != 'Windows'
@@ -74,9 +79,13 @@ jobs:
           dotnet-version: '10.0.x'
           dotnet-quality: 'preview'
 
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
       - name: Publish framework-dependent
         run: |
-          dotnet publish src/RazorLS.Server -c Release --no-self-contained -p:PublishSingleFile=false -o publish
+          dotnet publish src/RazorLS.Server -c Release --no-self-contained -p:PublishSingleFile=false -o publish -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Create zip
         run: |
