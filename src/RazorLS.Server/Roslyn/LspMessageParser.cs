@@ -1,5 +1,5 @@
 using System.Buffers;
-using System.Text;
+using System.Buffers.Text;
 using System.Text.Json;
 
 namespace RazorLS.Server.Roslyn;
@@ -10,7 +10,12 @@ namespace RazorLS.Server.Roslyn;
 /// </summary>
 public class LspMessageParser
 {
-    private int _contentLength = -1;
+    int _contentLength = -1;
+
+    // "Content-Length:" as bytes for zero-allocation header parsing
+    static ReadOnlySpan<byte> ContentLengthHeader => "Content-Length:"u8;
+    static ReadOnlySpan<byte> HeaderTerminator => "\r\n\r\n"u8;
+    static ReadOnlySpan<byte> LineTerminator => "\r\n"u8;
 
     /// <summary>
     /// Tries to parse a complete LSP message from the buffer.
@@ -25,19 +30,29 @@ public class LspMessageParser
         // If we don't have content length yet, look for headers
         if (_contentLength < 0)
         {
-            // Use string-based header parsing (simpler, proven to work)
-            var str = Encoding.UTF8.GetString(data, 0, dataLength);
-            var headerEnd = str.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            var span = data.AsSpan(0, dataLength);
+            var headerEnd = span.IndexOf(HeaderTerminator);
             if (headerEnd < 0) return false;
 
-            var headers = str.Substring(0, headerEnd);
-            foreach (var line in headers.Split("\r\n"))
+            // Parse headers directly from bytes (LSP headers are ASCII)
+            var headers = span.Slice(0, headerEnd);
+            while (headers.Length > 0)
             {
-                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                var lineEnd = headers.IndexOf(LineTerminator);
+                var line = lineEnd < 0 ? headers : headers.Slice(0, lineEnd);
+
+                if (line.StartsWith(ContentLengthHeader))
                 {
-                    _contentLength = int.Parse(line.Substring(15).Trim());
-                    break;
+                    var valueSpan = line.Slice(ContentLengthHeader.Length).Trim((byte)' ');
+                    if (Utf8Parser.TryParse(valueSpan, out int contentLength, out _))
+                    {
+                        _contentLength = contentLength;
+                        break;
+                    }
                 }
+
+                if (lineEnd < 0) break;
+                headers = headers.Slice(lineEnd + 2);
             }
 
             if (_contentLength < 0) return false;

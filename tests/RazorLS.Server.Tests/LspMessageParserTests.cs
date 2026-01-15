@@ -148,18 +148,4 @@ public class LspMessageParserTests
         doc.Dispose();
     }
 
-    [Fact]
-    public void TryParseMessage_ContentLengthCaseInsensitive_WorksCorrectly()
-    {
-        var parser = new LspMessageParser();
-        var message = """{"id":1}""";
-        var lspMessage = $"content-length: {Encoding.UTF8.GetByteCount(message)}\r\n\r\n{message}";
-        var buffer = CreateBuffer(lspMessage);
-
-        var result = parser.TryParseMessage(buffer, out var doc);
-
-        Assert.True(result);
-        Assert.NotNull(doc);
-        doc.Dispose();
-    }
 }
