@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using RazorLS.Dependencies;
@@ -39,7 +38,7 @@ public class RazorLanguageServer : IAsyncDisposable
         PropertyNameCaseInsensitive = true
     };
 
-    static readonly string Version = GetVersion();
+    static readonly string Version = VersionHelper.GetAssemblyVersion();
 
     // Pre-computed arrays for LSP capabilities (avoid allocation on every initialize)
     static readonly int[] SymbolKindValues = Enum.GetValues<SymbolKind>().Cast<int>().ToArray();
@@ -50,12 +49,6 @@ public class RazorLanguageServer : IAsyncDisposable
     static readonly JsonElement DefaultFormattingOptions = JsonSerializer.SerializeToElement(new { tabSize = 4, insertSpaces = true });
 
     const string VirtualHtmlSuffix = "__virtual.html";
-
-    static string GetVersion()
-    {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        return version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "0.0.0";
-    }
 
     public RazorLanguageServer(ILoggerFactory loggerFactory, DependencyManager dependencyManager)
     {

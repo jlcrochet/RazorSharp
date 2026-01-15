@@ -1,5 +1,5 @@
+using System.Buffers.Text;
 using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
@@ -48,14 +48,22 @@ public class RoslynRawClient : IAsyncDisposable
             throw new InvalidOperationException("Roslyn client is already started");
         }
 
-        var roslynArgs = BuildCommandLineArgs(options);
-        var allArgs = $"exec \"{options.ServerDllPath}\" {string.Join(" ", roslynArgs)}";
-        _logger.LogDebug("Starting Roslyn: dotnet {Args}", allArgs);
+        // var roslynArgs = BuildCommandLineArgs(options);
+        // var allArgs = $"exec \"{options.ServerDllPath}\" {string.Join(" ", roslynArgs)}";
+        // _logger.LogDebug("Starting Roslyn: dotnet {Args}", allArgs);
 
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = allArgs,
+            ArgumentList =
+            {
+                options.ServerDllPath,
+                "--stdio",
+                $"--logLevel={options.LogLevel}",
+                $"--razorSourceGenerator={options.RazorSourceGeneratorPath}",
+                $"--razorDesignTimePath={options.RazorDesignTimePath}",
+                "--extension", options.RazorExtensionPath
+            },
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -66,6 +74,13 @@ public class RoslynRawClient : IAsyncDisposable
                 ["DOTNET_CLI_UI_LANGUAGE"] = "en"
             }
         };
+
+        if (!string.IsNullOrEmpty(options.LogDirectory))
+        {
+            psi.ArgumentList.Add($"--extensionLogDirectory={options.LogDirectory}");
+        }
+
+        _logger.LogDebug("Starting Roslyn: dotnet {Args}", string.Join(' ', psi.ArgumentList));
 
         _process = Process.Start(psi);
         if (_process == null)
@@ -97,7 +112,7 @@ public class RoslynRawClient : IAsyncDisposable
     {
         var buffer = new byte[65536];
         var messageBuffer = new MemoryStream();
-        int contentLength = -1;
+        var parser = new LspMessageParser();
 
         try
         {
@@ -109,7 +124,7 @@ public class RoslynRawClient : IAsyncDisposable
                 messageBuffer.Write(buffer, 0, bytesRead);
 
                 // Try to parse complete messages from buffer
-                while (TryParseMessage(messageBuffer, ref contentLength, out var message))
+                while (parser.TryParseMessage(messageBuffer, out var message))
                 {
                     if (message != null)
                     {
@@ -123,59 +138,6 @@ public class RoslynRawClient : IAsyncDisposable
         {
             _logger.LogError(ex, "Error reading from Roslyn");
         }
-    }
-
-    private bool TryParseMessage(MemoryStream buffer, ref int contentLength, out JsonDocument? message)
-    {
-        message = null;
-        var data = buffer.GetBuffer();
-        var dataLength = (int)buffer.Length;
-
-        // If we don't have content length yet, look for headers
-        if (contentLength < 0)
-        {
-            var str = Encoding.UTF8.GetString(data, 0, dataLength);
-            var headerEnd = str.IndexOf("\r\n\r\n", StringComparison.Ordinal);
-            if (headerEnd < 0) return false;
-
-            var headers = str.Substring(0, headerEnd);
-            foreach (var line in headers.Split("\r\n"))
-            {
-                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
-                {
-                    contentLength = int.Parse(line.Substring(15).Trim());
-                    break;
-                }
-            }
-
-            if (contentLength < 0) return false;
-
-            // Remove headers from buffer - write directly with offset
-            var contentStart = headerEnd + 4;
-            var remainingLength = dataLength - contentStart;
-            buffer.SetLength(0);
-            buffer.Write(data, contentStart, remainingLength);
-            data = buffer.GetBuffer();
-            dataLength = remainingLength;
-        }
-
-        // Check if we have complete content
-        if (dataLength < contentLength) return false;
-
-        // Parse JSON content
-        var json = Encoding.UTF8.GetString(data, 0, contentLength);
-        message = JsonDocument.Parse(json);
-
-        // Remove processed content from buffer - write directly with offset
-        var restLength = dataLength - contentLength;
-        buffer.SetLength(0);
-        if (restLength > 0)
-        {
-            buffer.Write(data, contentLength, restLength);
-        }
-        contentLength = -1;
-
-        return true;
     }
 
     private async Task ProcessMessageAsync(JsonDocument doc, CancellationToken ct)
@@ -462,40 +424,32 @@ public class RoslynRawClient : IAsyncDisposable
         _logger.LogDebug("Sent response to Roslyn: id:{Id}", id);
     }
 
+    // Reusable JsonSerializerOptions for outbound messages
+    static readonly JsonSerializerOptions SendJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    // Reusable header buffer for outbound messages (thread-safe via lock in SendMessageAsync)
+    readonly byte[] _headerBuffer = new byte[32]; // "Content-Length: " (16) + digits (max 10) + "\r\n\r\n" (4)
+
     private async Task SendMessageAsync(object message)
     {
         if (_process == null) throw new InvalidOperationException("Process not started");
 
-        var json = JsonSerializer.Serialize(message, new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        });
-        var content = Encoding.UTF8.GetBytes(json);
-        var header = $"Content-Length: {content.Length}\r\n\r\n";
+        // Serialize directly to UTF-8 bytes (no intermediate string)
+        var content = JsonSerializer.SerializeToUtf8Bytes(message, SendJsonOptions);
+
+        // Build header directly in bytes: "Content-Length: {length}\r\n\r\n"
+        "Content-Length: "u8.CopyTo(_headerBuffer);
+        Utf8Formatter.TryFormat(content.Length, _headerBuffer.AsSpan(16), out var bytesWritten);
+        "\r\n\r\n"u8.CopyTo(_headerBuffer.AsSpan(16 + bytesWritten));
+        var headerLength = 16 + bytesWritten + 4;
 
         var stream = _process.StandardInput.BaseStream;
-        await stream.WriteAsync(Encoding.UTF8.GetBytes(header));
+        await stream.WriteAsync(_headerBuffer.AsMemory(0, headerLength));
         await stream.WriteAsync(content);
         await stream.FlushAsync();
-    }
-
-    private static List<string> BuildCommandLineArgs(RoslynStartOptions options)
-    {
-        var args = new List<string>
-        {
-            "--stdio",
-            $"--logLevel={options.LogLevel}",
-            $"--razorSourceGenerator={options.RazorSourceGeneratorPath}",
-            $"--razorDesignTimePath={options.RazorDesignTimePath}",
-            "--extension", options.RazorExtensionPath
-        };
-
-        if (!string.IsNullOrEmpty(options.LogDirectory))
-        {
-            args.Add($"--extensionLogDirectory={options.LogDirectory}");
-        }
-
-        return args;
     }
 
     public ValueTask DisposeAsync()

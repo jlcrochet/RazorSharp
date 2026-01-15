@@ -1,4 +1,3 @@
-using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RazorLS.Dependencies;
@@ -46,9 +45,7 @@ for (int i = 0; i < args.Length; i++)
             PrintHelp();
             return 0;
         case "--version":
-            var version = Assembly.GetExecutingAssembly().GetName().Version;
-            var versionStr = version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "0.0.0";
-            Console.WriteLine($"RazorLS {versionStr}");
+            Console.WriteLine($"RazorLS {VersionHelper.GetAssemblyVersion()}");
             return 0;
     }
 }

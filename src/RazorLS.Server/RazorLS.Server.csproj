@@ -8,11 +8,9 @@
     <RootNamespace>RazorLS.Server</RootNamespace>
     <AssemblyName>razorls</AssemblyName>
 
-    <!-- Publishing options for standalone executables -->
+    <!-- Publishing options (framework-dependent since dotnet is required for Roslyn LS anyway) -->
     <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>

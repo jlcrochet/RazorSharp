@@ -63,17 +63,26 @@ public class HtmlLanguageClient : IAsyncDisposable
         // Determine how to run the server:
         // - .js files: run with node
         // - Shell scripts (pnpm wrappers) or executables: run directly
-        var isJsFile = serverPath.EndsWith(".js", StringComparison.OrdinalIgnoreCase);
         var psi = new ProcessStartInfo
         {
-            FileName = isJsFile ? "node" : serverPath,
-            Arguments = isJsFile ? $"\"{serverPath}\" --stdio" : "--stdio",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        if (Path.GetExtension(serverPath).ToLower() == ".js")
+        {
+            psi.FileName = "node";
+            psi.ArgumentList.Add(serverPath);
+        }
+        else
+        {
+            psi.FileName = serverPath;
+        }
+
+        psi.ArgumentList.Add("--stdio");
 
         try
         {
@@ -330,6 +339,35 @@ public class HtmlLanguageClient : IAsyncDisposable
         return razorUri + "__virtual.html";
     }
 
+    /// <summary>
+    /// Adds pnpm global paths for all store versions found in the given directory.
+    /// Pnpm uses numbered directories (5, 6, etc.) for different store format versions.
+    /// </summary>
+    private static void AddPnpmGlobalPaths(List<string> paths, string pnpmGlobalDir)
+    {
+        if (!Directory.Exists(pnpmGlobalDir))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(pnpmGlobalDir))
+            {
+                var dirName = Path.GetFileName(dir);
+                // pnpm store versions are numeric (5, 6, etc.)
+                if (int.TryParse(dirName, out _))
+                {
+                    paths.Add(Path.Combine(dir, "node_modules", "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+                }
+            }
+        }
+        catch
+        {
+            // Ignore errors reading directory
+        }
+    }
+
     private static string? FindHtmlLanguageServer()
     {
         var possiblePaths = new List<string>();
@@ -339,26 +377,22 @@ public class HtmlLanguageClient : IAsyncDisposable
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
             // Windows: npm global install location
-            possiblePaths.Add(Path.Combine(appData, "npm", "node_modules",
-                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            possiblePaths.Add(Path.Combine(appData, "npm", "node_modules", "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
             // Windows: yarn global
-            possiblePaths.Add(Path.Combine(appData, "yarn", "global", "node_modules",
-                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
-            // Windows: pnpm global
-            possiblePaths.Add(Path.Combine(appData, "pnpm", "global", "5", "node_modules",
-                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            possiblePaths.Add(Path.Combine(appData, "yarn", "global", "node_modules", "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            // Windows: pnpm global (check all store versions)
+            AddPnpmGlobalPaths(possiblePaths, Path.Combine(appData, "pnpm", "global"));
         }
         else
         {
             // Unix: npm global install locations
-            possiblePaths.Add(Path.Combine(userProfile, ".npm-global", "lib", "node_modules",
-                "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
+            possiblePaths.Add(Path.Combine(userProfile, ".npm-global", "lib", "node_modules", "vscode-langservers-extracted", "bin", "vscode-html-language-server"));
             possiblePaths.Add("/usr/local/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server");
             possiblePaths.Add("/usr/lib/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server");
             // Unix: yarn global
             possiblePaths.Add(Path.Combine(userProfile, ".yarn", "bin", "vscode-html-language-server"));
-            // Unix: pnpm global
-            possiblePaths.Add(Path.Combine(userProfile, ".local", "share", "pnpm", "vscode-html-language-server"));
+            // Unix: pnpm global (check all store versions)
+            AddPnpmGlobalPaths(possiblePaths, Path.Combine(userProfile, ".local", "share", "pnpm", "global"));
         }
 
         foreach (var path in possiblePaths)
@@ -391,7 +425,7 @@ public class HtmlLanguageClient : IAsyncDisposable
             var psi = new ProcessStartInfo
             {
                 FileName = isWindows ? "where" : "which",
-                Arguments = "vscode-html-language-server",
+                ArgumentList = { "vscode-html-language-server" },
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true

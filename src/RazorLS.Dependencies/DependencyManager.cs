@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -19,20 +18,13 @@ public class DependencyManager
     // VS Code C# extension version - update this when newer versions are available
     const string ExtensionVersion = "2.111.2";
 
-    private static string GetVersion()
-    {
-        var assembly = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
-        var version = assembly.GetName().Version;
-        return version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "0.0.0";
-    }
-
     public DependencyManager(ILogger<DependencyManager> logger, string? basePath = null, bool skipDependencyCheck = false)
     {
         _logger = logger;
         _basePath = basePath ?? GetDefaultBasePath();
         _skipDependencyCheck = skipDependencyCheck;
         _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", $"RazorLS/{GetVersion()}");
+        _httpClient.DefaultRequestHeaders.Add("User-Agent", $"RazorLS/{VersionHelper.GetAssemblyVersion()}");
     }
 
     public string BasePath => _basePath;
