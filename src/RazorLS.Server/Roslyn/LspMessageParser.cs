@@ -42,21 +42,28 @@ public class LspMessageParser
 
             if (_contentLength < 0) return false;
 
-            // Remove headers from buffer using pooled array
+            // Remove headers from buffer
             var contentStart = headerEnd + 4;
             var remainingLength = dataLength - contentStart;
-            var contentBytes = ArrayPool<byte>.Shared.Rent(remainingLength);
-            try
+            if (remainingLength > 0)
             {
-                Buffer.BlockCopy(data, contentStart, contentBytes, 0, remainingLength);
+                var contentBytes = ArrayPool<byte>.Shared.Rent(remainingLength);
+                try
+                {
+                    Buffer.BlockCopy(data, contentStart, contentBytes, 0, remainingLength);
+                    buffer.SetLength(0);
+                    buffer.Write(contentBytes, 0, remainingLength);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(contentBytes);
+                }
+                data = buffer.GetBuffer();
+            }
+            else
+            {
                 buffer.SetLength(0);
-                buffer.Write(contentBytes, 0, remainingLength);
             }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(contentBytes);
-            }
-            data = buffer.GetBuffer();
             dataLength = remainingLength;
         }
 

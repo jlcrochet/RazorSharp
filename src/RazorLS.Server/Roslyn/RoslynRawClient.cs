@@ -48,10 +48,6 @@ public class RoslynRawClient : IAsyncDisposable
             throw new InvalidOperationException("Roslyn client is already started");
         }
 
-        // var roslynArgs = BuildCommandLineArgs(options);
-        // var allArgs = $"exec \"{options.ServerDllPath}\" {string.Join(" ", roslynArgs)}";
-        // _logger.LogDebug("Starting Roslyn: dotnet {Args}", allArgs);
-
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",

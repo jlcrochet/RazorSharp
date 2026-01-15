@@ -72,7 +72,7 @@ public class HtmlLanguageClient : IAsyncDisposable
             CreateNoWindow = true
         };
 
-        if (Path.GetExtension(serverPath).ToLower() == ".js")
+        if (serverPath.EndsWith(".js", StringComparison.OrdinalIgnoreCase))
         {
             psi.FileName = "node";
             psi.ArgumentList.Add(serverPath);
