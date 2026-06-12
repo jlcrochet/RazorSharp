@@ -1097,10 +1097,19 @@ public partial class RazorLanguageServer : IAsyncDisposable
                         openTarget = _initParams.WorkspaceFolders[0].Uri;
                     }
 
+                    var workspaceOpened = false;
                     if (openTarget != null)
                     {
                         _workspaceOpenTarget = openTarget;
-                        await OpenWorkspaceAsync(openTarget);
+                        workspaceOpened = await OpenWorkspaceAsync(openTarget);
+                    }
+
+                    if (!workspaceOpened)
+                    {
+                        _logger.LogInformation("No workspace project or solution opened; proceeding with open documents.");
+                        _roslynProjectInitialized.TrySetResult();
+                        await EndWorkspaceInitializationProgressAsync();
+                        await FlushPendingOpensAsync();
                     }
 
                     _logger.LogDebug("Workspace opened, waiting for project initialization...");
@@ -1123,11 +1132,6 @@ public partial class RazorLanguageServer : IAsyncDisposable
 
     private void StartWorkspaceInitializationTimeout()
     {
-        if (_workspaceInitProgress == null)
-        {
-            return;
-        }
-
         lock (_workspaceInitLock)
         {
             if (_workspaceInitTimeoutTask != null)
@@ -1147,9 +1151,11 @@ public partial class RazorLanguageServer : IAsyncDisposable
                     if (completed != _roslynProjectInitialized.Task && !_roslynProjectInitialized.Task.IsCompleted)
                     {
                         _logger.LogWarning(
-                            "Workspace initialization did not complete within {TimeoutSeconds}s; stopping progress indicator.",
+                            "Workspace initialization did not complete within {TimeoutSeconds}s; proceeding with open documents.",
                             timeout.TotalSeconds);
+                        _roslynProjectInitialized.TrySetResult();
                         await EndWorkspaceInitializationProgressAsync();
+                        await FlushPendingOpensAsync();
                     }
                 }
                 catch (OperationCanceledException)
@@ -3220,19 +3226,15 @@ public partial class RazorLanguageServer : IAsyncDisposable
             return null;
         }
 
-        if (_forwardToRoslynOverride != null)
-        {
-            return await _forwardToRoslynOverride(method, @params, ct);
-        }
-
-        if (_roslynClient == null)
+        var forwardOverride = _forwardToRoslynOverride;
+        if (forwardOverride == null && _roslynClient == null)
         {
             _logger.LogWarning("Cannot forward {Method} - Roslyn client not initialized", method);
             return null;
         }
 
         // Check if Roslyn is still running
-        if (!_roslynClient.IsRunning)
+        if (forwardOverride == null && !_roslynClient!.IsRunning)
         {
             _logger.LogWarning("Cannot forward {Method} - Roslyn process has exited", method);
             return null;
@@ -3261,6 +3263,8 @@ public partial class RazorLanguageServer : IAsyncDisposable
                 }
 
                 _logger.LogDebug("Fast-start enabled; forwarding {Method} before project initialization completes", method);
+                _roslynProjectInitialized.TrySetResult();
+                await FlushPendingOpensAsync();
             }
             else
             {
@@ -3283,14 +3287,21 @@ public partial class RazorLanguageServer : IAsyncDisposable
                 else
                 {
                     _logger.LogDebug("Proceeding without initialization complete for {Method} (grace period elapsed)", method);
+                    _roslynProjectInitialized.TrySetResult();
+                    await FlushPendingOpensAsync();
                 }
             }
+        }
+
+        if (forwardOverride != null)
+        {
+            return await forwardOverride(method, @params, ct);
         }
 
         try
         {
             _logger.LogDebug("Forwarding {Method} to Roslyn", method);
-            var result = await _roslynClient.SendRequestAsync(method, @params, ct)
+            var result = await _roslynClient!.SendRequestAsync(method, @params, ct)
                 .WaitAsync(_roslynRequestTimeout, ct);
             _logger.LogDebug("Received response from Roslyn for {Method}", method);
             return result;
@@ -3457,15 +3468,15 @@ public partial class RazorLanguageServer : IAsyncDisposable
         }
     }
 
-    private async Task OpenWorkspaceAsync(string rootUriOrPath)
+    private async Task<bool> OpenWorkspaceAsync(string rootUriOrPath)
     {
         if (!CanSendRoslynNotifications)
         {
-            return;
+            return false;
         }
 
         _workspaceOpenedAt = DateTime.UtcNow;
-        await _workspaceOpenCoordinator.OpenWorkspaceAsync(rootUriOrPath);
+        return await _workspaceOpenCoordinator.OpenWorkspaceAsync(rootUriOrPath);
     }
 
     private async Task TryRegisterFileWatchersAsync()

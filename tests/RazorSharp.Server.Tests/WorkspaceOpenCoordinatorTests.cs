@@ -23,8 +23,9 @@ public class WorkspaceOpenCoordinatorTests
             methodCapture: m => method = m,
             payloadCapture: p => payload = p);
 
-        await coordinator.OpenWorkspaceAsync(solutionPath);
+        var opened = await coordinator.OpenWorkspaceAsync(solutionPath);
 
+        Assert.True(opened);
         Assert.Equal(LspMethods.SolutionOpen, method);
         Assert.NotNull(payload);
         var json = JsonSerializer.SerializeToElement(payload);
@@ -46,8 +47,9 @@ public class WorkspaceOpenCoordinatorTests
             methodCapture: m => method = m,
             payloadCapture: p => payload = p);
 
-        await coordinator.OpenWorkspaceAsync(projectPath);
+        var opened = await coordinator.OpenWorkspaceAsync(projectPath);
 
+        Assert.True(opened);
         Assert.Equal(LspMethods.ProjectOpen, method);
         Assert.NotNull(payload);
         var json = JsonSerializer.SerializeToElement(payload);
@@ -72,12 +74,31 @@ public class WorkspaceOpenCoordinatorTests
             methodCapture: m => method = m,
             payloadCapture: p => payload = p);
 
-        await coordinator.OpenWorkspaceAsync(temp.Path);
+        var opened = await coordinator.OpenWorkspaceAsync(temp.Path);
 
+        Assert.True(opened);
         Assert.Equal(LspMethods.ProjectOpen, method);
         Assert.NotNull(payload);
         var json = JsonSerializer.SerializeToElement(payload);
         Assert.Equal(2, json.GetProperty("projects").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task OpenWorkspaceAsync_DirectoryWithoutSolutionOrProjects_ReturnsFalse()
+    {
+        using var loggerFactory = LoggerFactory.Create(_ => { });
+        using var temp = new TempDir();
+
+        string? method = null;
+        var coordinator = CreateCoordinator(
+            loggerFactory,
+            methodCapture: m => method = m,
+            payloadCapture: _ => { });
+
+        var opened = await coordinator.OpenWorkspaceAsync(temp.Path);
+
+        Assert.False(opened);
+        Assert.Null(method);
     }
 
     static WorkspaceOpenCoordinator CreateCoordinator(

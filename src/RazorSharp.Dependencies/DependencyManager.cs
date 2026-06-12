@@ -830,8 +830,10 @@ public class DependencyManager : IDisposable
                 MaxTotalUncompressedBytes,
                 MaxSingleEntryUncompressedBytes), cancellationToken);
 
-            // Find and copy Razor extension
-            var razorSource = Path.Combine(tempExtractPath, "extension", ".razorExtension");
+            // Find and copy Razor extension. Older C# VSIX packages used
+            // extension/.razorExtension; newer packages place the same payload
+            // under extension/.roslyn.
+            var razorSource = GetRazorExtensionSourcePath(tempExtractPath);
             if (Directory.Exists(razorSource))
             {
                 if (Directory.Exists(destinationPath))
@@ -843,7 +845,7 @@ public class DependencyManager : IDisposable
             }
             else
             {
-                throw new InvalidOperationException($"Razor extension not found in VSIX at {razorSource}");
+                throw new InvalidOperationException($"Razor extension not found in VSIX under {Path.Combine(tempExtractPath, "extension")}");
             }
         }
         finally
@@ -853,6 +855,18 @@ public class DependencyManager : IDisposable
                 Directory.Delete(tempExtractPath, recursive: true);
             }
         }
+    }
+
+    internal static string GetRazorExtensionSourcePath(string extractPath)
+    {
+        var extensionPath = Path.Combine(extractPath, "extension");
+        var legacyPath = Path.Combine(extensionPath, ".razorExtension");
+        if (Directory.Exists(legacyPath))
+        {
+            return legacyPath;
+        }
+
+        return Path.Combine(extensionPath, ".roslyn");
     }
 
     private static void CopyDirectory(string sourceDir, string destinationDir)

@@ -18,6 +18,7 @@ public class RoslynClient : IAsyncDisposable
 {
     readonly ILogger<RoslynClient> _logger;
     Process? _process;
+    readonly ConcurrentQueue<string> _recentStderr = new();
     bool _disposed;
     CancellationTokenSource? _readCts;
     Task? _readTask;
@@ -55,24 +56,7 @@ public class RoslynClient : IAsyncDisposable
             throw new InvalidOperationException("Roslyn client is already started");
         }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            ArgumentList =
-            {
-                options.ServerDllPath,
-                "--stdio",
-                $"--logLevel={options.LogLevel}",
-                $"--razorSourceGenerator={options.RazorSourceGeneratorPath}",
-                $"--razorDesignTimePath={options.RazorDesignTimePath}",
-                "--extension", options.RazorExtensionPath
-            },
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        var psi = CreateProcessStartInfo(options);
 
         if (!string.IsNullOrEmpty(options.LogDirectory))
         {
@@ -90,19 +74,23 @@ public class RoslynClient : IAsyncDisposable
         _processCts = new CancellationTokenSource();
         var process = _process;
         var processCts = _processCts;
+        _recentStderr.Clear();
 
         // Capture stderr for logging (track task for cleanup)
         _stderrTask = Task.Run(async () =>
         {
             try
             {
-                while (!process.HasExited)
+                while (true)
                 {
                     var line = await process.StandardError.ReadLineAsync(processCts.Token);
-                    if (line != null)
+                    if (line == null)
                     {
-                        _logger.LogDebug("[Roslyn stderr] {Line}", line);
+                        break;
                     }
+
+                    TrackStderrLine(line);
+                    _logger.LogDebug("[Roslyn stderr] {Line}", line);
                 }
             }
             catch (OperationCanceledException) { }
@@ -115,8 +103,18 @@ public class RoslynClient : IAsyncDisposable
             try
             {
                 await process.WaitForExitAsync(processCts.Token);
+                var stderrTask = _stderrTask;
+                if (stderrTask != null)
+                {
+                    await Task.WhenAny(stderrTask, Task.Delay(TimeSpan.FromMilliseconds(250), processCts.Token));
+                }
+
                 var exitCode = process.ExitCode;
                 _logger.LogWarning("Roslyn process exited with code {ExitCode}", exitCode);
+                if (exitCode != 0)
+                {
+                    LogRecentStderr();
+                }
 
                 // Fail all pending requests
                 foreach (var kvp in _pendingRequests)
@@ -142,6 +140,50 @@ public class RoslynClient : IAsyncDisposable
         _readTask = ReadMessagesAsync(process, _readCts.Token);
 
         _logger.LogInformation("Roslyn language server started (PID: {Pid})", process.Id);
+    }
+
+    internal static ProcessStartInfo CreateProcessStartInfo(RoslynStartOptions options)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        psi.ArgumentList.Add(options.ServerDllPath);
+        psi.ArgumentList.Add("--stdio");
+        psi.ArgumentList.Add($"--logLevel={options.LogLevel}");
+        psi.ArgumentList.Add("--extension");
+        psi.ArgumentList.Add(options.RazorExtensionPath);
+
+        return psi;
+    }
+
+    private void TrackStderrLine(string line)
+    {
+        const int maxRecentStderrLines = 20;
+        _recentStderr.Enqueue(line);
+        while (_recentStderr.Count > maxRecentStderrLines)
+        {
+            _recentStderr.TryDequeue(out _);
+        }
+    }
+
+    private void LogRecentStderr()
+    {
+        var lines = _recentStderr.ToArray();
+        if (lines.Length == 0)
+        {
+            return;
+        }
+
+        _logger.LogWarning("Recent Roslyn stderr before exit:{NewLine}{Stderr}",
+            Environment.NewLine,
+            string.Join(Environment.NewLine, lines));
     }
 
     private async Task ReadMessagesAsync(Process process, CancellationToken ct)
@@ -657,8 +699,6 @@ public class RoslynClient : IAsyncDisposable
         return new RoslynStartOptions
         {
             ServerDllPath = deps.RoslynServerDllPath,
-            RazorSourceGeneratorPath = deps.RazorSourceGeneratorPath,
-            RazorDesignTimePath = deps.RazorDesignTimePath,
             RazorExtensionPath = deps.RazorExtensionDllPath,
             LogDirectory = logDirectory,
             LogLevel = logLevel
@@ -672,8 +712,6 @@ public class RoslynClient : IAsyncDisposable
 public record RoslynStartOptions
 {
     public required string ServerDllPath { get; init; }
-    public required string RazorSourceGeneratorPath { get; init; }
-    public required string RazorDesignTimePath { get; init; }
     public required string RazorExtensionPath { get; init; }
     public string? LogDirectory { get; init; }
     public string LogLevel { get; init; } = "Information";

@@ -30,13 +30,13 @@ internal sealed class WorkspaceOpenCoordinator
         _solutionXmlFileName = solutionXmlFileName;
     }
 
-    public async Task OpenWorkspaceAsync(string rootUriOrPath)
+    public async Task<bool> OpenWorkspaceAsync(string rootUriOrPath)
     {
         var rootPath = _tryGetLocalPath(rootUriOrPath);
         if (rootPath == null)
         {
             _logger.LogWarning("Invalid workspace root: {Root}", rootUriOrPath);
-            return;
+            return false;
         }
 
         if (File.Exists(rootPath))
@@ -51,6 +51,7 @@ internal sealed class WorkspaceOpenCoordinator
                 {
                     Solution = new Uri(rootPath).AbsoluteUri
                 });
+                return true;
             }
             else if (extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase))
             {
@@ -59,19 +60,20 @@ internal sealed class WorkspaceOpenCoordinator
                 {
                     Projects = [new Uri(rootPath).AbsoluteUri]
                 });
+                return true;
             }
             else
             {
                 _logger.LogWarning("Workspace path is a file but not a supported project/solution: {Path}", rootPath);
             }
 
-            return;
+            return false;
         }
 
         if (!Directory.Exists(rootPath))
         {
             _logger.LogWarning("Workspace root does not exist: {Path}", rootPath);
-            return;
+            return false;
         }
 
         var solution = _workspaceManager.FindSolution(rootPath);
@@ -82,7 +84,7 @@ internal sealed class WorkspaceOpenCoordinator
             {
                 Solution = new Uri(solution).AbsoluteUri
             });
-            return;
+            return true;
         }
 
         // No solution file found - open projects directly.
@@ -94,6 +96,10 @@ internal sealed class WorkspaceOpenCoordinator
             {
                 Projects = projects.Select(p => new Uri(p).AbsoluteUri).ToArray()
             });
+            return true;
         }
+
+        _logger.LogInformation("No solution or project files found under workspace root: {Path}", rootPath);
+        return false;
     }
 }

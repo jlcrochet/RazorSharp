@@ -184,10 +184,131 @@ public class PendingOpenCoalescingIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task WorkspaceInitializationTimeout_FlushesPendingDidOpen()
+    {
+        using var loggerFactory = LoggerFactory.Create(builder => { });
+        using var deps = new DependencyManager(loggerFactory.CreateLogger<DependencyManager>(), "test");
+        var server = new RazorLanguageServer(loggerFactory, deps);
+        var didOpenForwarded = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        server.SetInitializeParamsForTests(new RazorSharp.Protocol.Messages.InitializeParams());
+        server.SetStartRoslynOverrideForTests(_ => Task.FromResult(true));
+        server.SetWorkspaceInitProgressTimeoutForTests(50);
+        server.SetForwardToRoslynNotificationOverrideForTests((method, @params) =>
+        {
+            if (method == LspMethods.TextDocumentDidOpen)
+            {
+                didOpenForwarded.TrySetResult(ToJsonElement(@params));
+            }
+
+            return Task.CompletedTask;
+        });
+
+        try
+        {
+            server.HandleInitialized();
+
+            var didOpen = JsonSerializer.SerializeToElement(new
+            {
+                textDocument = new
+                {
+                    uri = "file:///loose.cs",
+                    languageId = "c-sharp",
+                    version = 1,
+                    text = "class C { }"
+                }
+            });
+
+            await server.HandleDidOpenAsync(didOpen);
+
+            var forwarded = await AwaitOrTimeout(
+                didOpenForwarded.Task,
+                2000,
+                "Pending didOpen was not flushed when workspace initialization timed out.");
+            var textDocument = forwarded.GetProperty("textDocument");
+            Assert.Equal("file:///loose.cs", textDocument.GetProperty("uri").GetString());
+            Assert.Equal("csharp", textDocument.GetProperty("languageId").GetString());
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task FastStartRequest_FlushesPendingDidOpenBeforeForwarding()
+    {
+        using var loggerFactory = LoggerFactory.Create(builder => { });
+        using var deps = new DependencyManager(loggerFactory.CreateLogger<DependencyManager>(), "test");
+        var server = new RazorLanguageServer(loggerFactory, deps);
+        var didOpenForwarded = false;
+        var hoverForwardedAfterDidOpen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        server.SetInitializeParamsForTests(new RazorSharp.Protocol.Messages.InitializeParams());
+        server.SetForwardToRoslynNotificationOverrideForTests((method, _) =>
+        {
+            if (method == LspMethods.TextDocumentDidOpen)
+            {
+                didOpenForwarded = true;
+            }
+
+            return Task.CompletedTask;
+        });
+        server.SetForwardToRoslynOverrideForTests((method, _, _) =>
+        {
+            if (method == LspMethods.TextDocumentHover && didOpenForwarded)
+            {
+                hoverForwardedAfterDidOpen.TrySetResult(true);
+            }
+
+            return Task.FromResult<JsonElement?>(null);
+        });
+
+        try
+        {
+            var didOpen = JsonSerializer.SerializeToElement(new
+            {
+                textDocument = new
+                {
+                    uri = "file:///loose.cs",
+                    languageId = "c-sharp",
+                    version = 1,
+                    text = "class C { }"
+                }
+            });
+
+            await server.HandleDidOpenAsync(didOpen);
+
+            var hover = JsonSerializer.SerializeToElement(new
+            {
+                textDocument = new { uri = "file:///loose.cs" },
+                position = new { line = 0, character = 6 }
+            });
+
+            await server.HandleHoverAsync(hover, CancellationToken.None);
+            await AwaitOrTimeout(
+                hoverForwardedAfterDidOpen.Task,
+                2000,
+                "Hover was not forwarded after flushing pending didOpen.");
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
     static async Task AwaitOrTimeout(Task task, int timeoutMs, string message)
     {
         var completed = await Task.WhenAny(task, Task.Delay(timeoutMs)) == task;
         Assert.True(completed, message);
+    }
+
+    static async Task<T> AwaitOrTimeout<T>(Task<T> task, int timeoutMs, string message)
+    {
+        var completed = await Task.WhenAny(task, Task.Delay(timeoutMs)) == task;
+        Assert.True(completed, message);
+        return await task;
     }
 
     static JsonElement ToJsonElement(object? value)

@@ -48,6 +48,43 @@ public class DependencyManagerTests
         Assert.EndsWith(Path.Combine("razorsharp"), manager.BasePath, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void GetRazorExtensionSourcePath_PrefersLegacyRazorExtensionDirectory()
+    {
+        var tempRoot = CreateTempDir();
+        try
+        {
+            var extensionRoot = Path.Combine(tempRoot, "extension");
+            var legacyPath = Path.Combine(extensionRoot, ".razorExtension");
+            var roslynPath = Path.Combine(extensionRoot, ".roslyn");
+            Directory.CreateDirectory(legacyPath);
+            Directory.CreateDirectory(roslynPath);
+
+            Assert.Equal(legacyPath, DependencyManager.GetRazorExtensionSourcePath(tempRoot));
+        }
+        finally
+        {
+            DeleteTempDir(tempRoot);
+        }
+    }
+
+    [Fact]
+    public void GetRazorExtensionSourcePath_FallsBackToRoslynDirectory()
+    {
+        var tempRoot = CreateTempDir();
+        try
+        {
+            var roslynPath = Path.Combine(tempRoot, "extension", ".roslyn");
+            Directory.CreateDirectory(roslynPath);
+
+            Assert.Equal(roslynPath, DependencyManager.GetRazorExtensionSourcePath(tempRoot));
+        }
+        finally
+        {
+            DeleteTempDir(tempRoot);
+        }
+    }
+
     private static ILogger<DependencyManager> CreateLogger()
     {
         var loggerFactory = LoggerFactory.Create(builder => { });
