@@ -298,6 +298,67 @@ public class PendingOpenCoalescingIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task FirstHoverReturningNull_IsRetriedOnceAfterDidOpen()
+    {
+        using var loggerFactory = LoggerFactory.Create(builder => { });
+        using var deps = new DependencyManager(loggerFactory.CreateLogger<DependencyManager>(), "test");
+        var server = new RazorLanguageServer(loggerFactory, deps);
+        var hoverCalls = 0;
+
+        server.SetForwardToRoslynNotificationOverrideForTests((_, _) => Task.CompletedTask);
+        server.SetForwardToRoslynOverrideForTests((method, _, _) =>
+        {
+            if (method != LspMethods.TextDocumentHover)
+            {
+                return Task.FromResult<JsonElement?>(null);
+            }
+
+            hoverCalls++;
+            if (hoverCalls == 1)
+            {
+                return Task.FromResult<JsonElement?>(
+                    JsonSerializer.SerializeToElement((object?)null));
+            }
+
+            return Task.FromResult<JsonElement?>(
+                JsonSerializer.SerializeToElement(new { contents = "ready" }));
+        });
+
+        try
+        {
+            await server.HandleRoslynNotificationForTests(LspMethods.ProjectInitializationComplete, null, CancellationToken.None);
+
+            var didOpen = JsonSerializer.SerializeToElement(new
+            {
+                textDocument = new
+                {
+                    uri = "file:///project/Submission.cs",
+                    languageId = "c-sharp",
+                    version = 1,
+                    text = "class Submission { }"
+                }
+            });
+            await server.HandleDidOpenAsync(didOpen);
+
+            var hover = JsonSerializer.SerializeToElement(new
+            {
+                textDocument = new { uri = "file:///project/Submission.cs" },
+                position = new { line = 0, character = 6 }
+            });
+
+            var result = await server.HandleHoverAsync(hover, CancellationToken.None);
+
+            Assert.Equal(2, hoverCalls);
+            Assert.NotNull(result);
+            Assert.Equal("ready", result.Value.GetProperty("contents").GetString());
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
     static async Task AwaitOrTimeout(Task task, int timeoutMs, string message)
     {
         var completed = await Task.WhenAny(task, Task.Delay(timeoutMs)) == task;

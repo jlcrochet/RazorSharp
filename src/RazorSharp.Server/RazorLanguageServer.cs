@@ -59,6 +59,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
     DateTime _workspaceOpenedAt;
     HashSet<string> _openDocuments;
     HashSet<string> _replayingOpenDocuments;
+    HashSet<string> _documentsPendingFirstRequest;
     Dictionary<string, PendingOpenState> _pendingOpens;
     Dictionary<string, List<JsonElement>> _pendingChanges;
     readonly Lock _documentTrackingLock = new();
@@ -115,6 +116,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
     const int WorkspaceReloadDebounceMs = 1000;
     const int DefaultUserRequestProgressDelayMs = 1000;
     const int DefaultWorkspaceInitProgressTimeoutMs = 60000;
+    const int InitialDocumentRequestRetryDelayMs = 1000;
     const long DroppedNotificationsWarnEvery = 1000;
     const long RoslynTimeoutsWarnEvery = 100;
     static readonly TimeSpan TelemetryWarnMinInterval = TimeSpan.FromSeconds(30);
@@ -335,6 +337,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
             IsHighPriorityRoslynNotification);
         _openDocuments = new HashSet<string>(_uriComparer);
         _replayingOpenDocuments = new HashSet<string>(_uriComparer);
+        _documentsPendingFirstRequest = new HashSet<string>(_uriComparer);
         _pendingOpens = new Dictionary<string, PendingOpenState>(_uriComparer);
         _pendingChanges = new Dictionary<string, List<JsonElement>>(_uriComparer);
         _sourceGeneratedUriCache = new Dictionary<string, string>(_uriComparer);
@@ -1103,7 +1106,6 @@ public partial class RazorLanguageServer : IAsyncDisposable
                         _workspaceOpenTarget = openTarget;
                         workspaceOpened = await OpenWorkspaceAsync(openTarget);
                     }
-
                     if (!workspaceOpened)
                     {
                         _logger.LogInformation("No workspace project or solution opened; proceeding with open documents.");
@@ -1697,6 +1699,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
             _replayingOpenDocuments.Remove(uri);
             _pendingOpens.Remove(uri);
             _pendingChanges.Remove(uri);
+            _documentsPendingFirstRequest.Remove(uri);
         }
 
         if (CanSendRoslynNotifications)
@@ -2577,6 +2580,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
             _pendingChanges.Clear();
             _openDocuments.Clear();
             _replayingOpenDocuments.Clear();
+            _documentsPendingFirstRequest.Clear();
         }
     }
 
@@ -3293,6 +3297,40 @@ public partial class RazorLanguageServer : IAsyncDisposable
             }
         }
 
+        var retryUri = TryBeginInitialDocumentRequestRetry(method, @params);
+        var result = await SendRoslynRequestCoreAsync(method, @params, ct, forwardOverride);
+        if (IsNullResult(result) && retryUri != null)
+        {
+            _logger.LogDebug(
+                "First {Method} for {Uri} returned no result; retrying after {DelayMs}ms",
+                method,
+                retryUri,
+                InitialDocumentRequestRetryDelayMs);
+            try
+            {
+                await Task.Delay(InitialDocumentRequestRetryDelayMs, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogDebug("Initial {Method} retry canceled by client for {Uri}", method, retryUri);
+                return null;
+            }
+
+            result = await SendRoslynRequestCoreAsync(method, @params, ct, forwardOverride);
+        }
+
+        return IsNullResult(result) ? null : result;
+    }
+
+    private static bool IsNullResult(JsonElement? result)
+        => result == null || result.Value.ValueKind == JsonValueKind.Null;
+
+    private async Task<JsonElement?> SendRoslynRequestCoreAsync(
+        string method,
+        JsonElement @params,
+        CancellationToken ct,
+        Func<string, JsonElement, CancellationToken, Task<JsonElement?>>? forwardOverride)
+    {
         if (forwardOverride != null)
         {
             return await forwardOverride(method, @params, ct);
@@ -3327,6 +3365,28 @@ public partial class RazorLanguageServer : IAsyncDisposable
         {
             _logger.LogError(ex, "Error forwarding {Method} to Roslyn", method);
             throw;
+        }
+    }
+
+    private string? TryBeginInitialDocumentRequestRetry(string method, JsonElement @params)
+    {
+        if (method != LspMethods.TextDocumentHover ||
+            !@params.TryGetProperty("textDocument", out var textDocument) ||
+            !textDocument.TryGetProperty("uri", out var uriProp) ||
+            uriProp.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var uri = uriProp.GetString();
+        if (string.IsNullOrWhiteSpace(uri))
+        {
+            return null;
+        }
+
+        lock (_documentTrackingLock)
+        {
+            return _documentsPendingFirstRequest.Remove(uri) ? uri : null;
         }
     }
 
@@ -3388,6 +3448,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
         {
             _openDocuments.Add(openState.Uri);
             _replayingOpenDocuments.Add(openState.Uri);
+            _documentsPendingFirstRequest.Add(openState.Uri);
             _pendingOpens.Remove(openState.Uri);
         }
 
@@ -3515,6 +3576,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
         _uriComparison = isCaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         _openDocuments = new HashSet<string>(_uriComparer);
         _replayingOpenDocuments = new HashSet<string>(_uriComparer);
+        _documentsPendingFirstRequest = new HashSet<string>(_uriComparer);
         _pendingOpens = new Dictionary<string, PendingOpenState>(_uriComparer);
         _pendingChanges = new Dictionary<string, List<JsonElement>>(_uriComparer);
         _sourceGeneratedUriCache = new Dictionary<string, string>(_uriComparer);
