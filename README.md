@@ -88,7 +88,7 @@ If you have an apphost binary (`razorsharp`), you can run it directly instead of
 
 Downloads use a small retry/backoff for transient network failures.
 
-If auto-updates are enabled (default), RazorSharp will download missing dependencies in the background and start language services automatically. Restart is only required when updating existing dependencies.
+If auto-updates are enabled (default), RazorSharp will download missing dependencies in the background and start language services automatically. Restarting the editor or language server is only required when updating existing dependencies.
 
 ### Options
 
@@ -338,6 +338,7 @@ RazorSharp supports configuration via LSP `initializationOptions`. In Helix, thi
 | `logging.level` | string | `Information` | Default log level (CLI `--loglevel` overrides) |
 | `logging.file` | string | `null` | Log file path (CLI `--logFile` overrides) |
 | `dependencies.skipDependencyCheck` | bool | `false` | Skip dependency presence checks (CLI `--skip-dependency-check` overrides) |
+| `dependencies.showRestartPrompt` | bool | `true` | Show an interactive prompt after downloading updates; set to `false` to use a status message instead |
 | `requestProgressDelayMs` | int | `1000` | Delay (ms) before showing workDoneProgress for user requests; set `< 0` to disable |
 | `dependencies.pinnedRoslynVersion` | string | `null` | Pin Roslyn Language Server version (disables auto-update checks when set) |
 | `dependencies.pinnedExtensionVersion` | string | `null` | Pin Razor extension version (disables auto-update checks when set) |
@@ -351,6 +352,7 @@ command = "dotnet"
 args = ["/path/to/razorsharp.dll"]
 config.dependencies.pinnedRoslynVersion = "4.10.0"
 config.dependencies.pinnedExtensionVersion = "2.3.4"
+config.dependencies.showRestartPrompt = false
 config.logging.level = "Warning"
 config.logging.file = "/tmp/razorsharp.log"
 ```

@@ -151,6 +151,14 @@ public class LoggingOptions
 public class DependencyOptions
 {
     /// <summary>
+    /// Show an interactive restart prompt after downloading dependency updates.
+    /// Set to false to send a non-interactive status message instead.
+    /// Default: true
+    /// </summary>
+    [JsonPropertyName("showRestartPrompt")]
+    public bool? ShowRestartPrompt { get; set; }
+
+    /// <summary>
     /// Skip dependency presence checks during initialization.
     /// CLI --skip-dependency-check overrides this value.
     /// </summary>

@@ -47,6 +47,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
     Task? _dependencyDownloadTask;
     readonly Lock _dependencyDownloadLock = new();
     bool _dependenciesMissing;
+    bool _showRestartPrompt = true;
     bool _skipDependencyCheckSetByCli;
     bool _forceUpdateCheck;
     LoggingLevelSwitch? _loggingLevelSwitch;
@@ -510,26 +511,20 @@ public partial class RazorLanguageServer : IAsyncDisposable
 
     private void ApplyDependencySettings(DependencyOptions? options)
     {
-        if (options?.SkipDependencyCheck == null)
+        if (options == null)
         {
-            // Still apply pinned versions even if skipDependencyCheck isn't specified.
-            if (options != null)
+            return;
+        }
+
+        _showRestartPrompt = options.ShowRestartPrompt ?? true;
+
+        if (options.SkipDependencyCheck != null && !_skipDependencyCheckSetByCli)
+        {
+            _skipDependencyCheck = options.SkipDependencyCheck.Value;
+            if (_skipDependencyCheck)
             {
-                ApplyPinnedDependencyVersions(options);
+                _logger.LogInformation("Dependency checks disabled by initializationOptions");
             }
-            return;
-        }
-
-        if (_skipDependencyCheckSetByCli)
-        {
-            ApplyPinnedDependencyVersions(options);
-            return;
-        }
-
-        _skipDependencyCheck = options.SkipDependencyCheck.Value;
-        if (_skipDependencyCheck)
-        {
-            _logger.LogInformation("Dependency checks disabled by initializationOptions");
         }
 
         ApplyPinnedDependencyVersions(options);
@@ -860,7 +855,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
                         else
                         {
                             await NotifyRestartAsync(
-                                "RazorSharp downloaded dependencies but couldn't start language services. Restart your editor.",
+                                "RazorSharp downloaded dependencies but couldn't start language services. Restart your editor or language server.",
                                 MessageType.Warning);
                         }
                     }
@@ -1220,7 +1215,7 @@ public partial class RazorLanguageServer : IAsyncDisposable
                 var versionLabel = result.TargetVersion ?? "a newer version";
                 _logger.LogInformation("Dependency update {Version} is ready; restart to use it.", versionLabel);
                 await NotifyRestartAsync(
-                    $"RazorSharp downloaded dependency update {versionLabel}. Restart your editor to use it.",
+                    $"RazorSharp downloaded dependency update {versionLabel}. Restart your editor or language server to use it.",
                     MessageType.Info);
             }
         }
@@ -1267,7 +1262,9 @@ public partial class RazorLanguageServer : IAsyncDisposable
 
     private async Task NotifyRestartAsync(string message, MessageType type)
     {
-        if (!SupportsShowMessageRequest || (_clientRpc == null && _clientRequestOverride == null))
+        if (!_showRestartPrompt ||
+            !SupportsShowMessageRequest ||
+            (_clientRpc == null && _clientRequestOverride == null))
         {
             await NotifyUserAsync(message, type);
             return;

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using RazorSharp.Dependencies;
 using RazorSharp.Protocol.Messages;
 using RazorSharp.Server;
+using RazorSharp.Server.Configuration;
 
 namespace RazorSharp.Server.Tests;
 
@@ -68,6 +69,52 @@ public class RestartPromptTests
                     Window = new WindowClientCapabilities()
                 }
             });
+
+            var requestCalled = false;
+            var notificationCalled = false;
+
+            server.SetClientRequestOverrideForTests((method, @params, _) =>
+            {
+                requestCalled = true;
+                return Task.FromResult<JsonElement?>(null);
+            });
+
+            server.SetClientNotificationOverrideForTests((method, @params) =>
+            {
+                notificationCalled = method == RazorSharp.Protocol.LspMethods.WindowShowMessage;
+                return Task.CompletedTask;
+            });
+
+            await server.NotifyRestartForTests("restart", RazorLanguageServer.MessageType.Info);
+
+            Assert.False(requestCalled);
+            Assert.True(notificationCalled);
+        }
+        finally
+        {
+            await server.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task NotifyRestart_UsesShowMessage_WhenRestartPromptDisabled()
+    {
+        using var loggerFactory = LoggerFactory.Create(builder => { });
+        using var deps = new DependencyManager(loggerFactory.CreateLogger<DependencyManager>(), "test");
+        var server = new RazorLanguageServer(loggerFactory, deps);
+        try
+        {
+            server.SetInitializeParamsForTests(new InitializeParams
+            {
+                Capabilities = new ClientCapabilities
+                {
+                    Window = new WindowClientCapabilities
+                    {
+                        ShowMessage = new ShowMessageRequestClientCapabilities()
+                    }
+                }
+            });
+            server.ApplyDependencySettingsForTests(new DependencyOptions { ShowRestartPrompt = false });
 
             var requestCalled = false;
             var notificationCalled = false;
